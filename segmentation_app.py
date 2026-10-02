@@ -29,6 +29,7 @@ import ipywidgets as widgets
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from sklearn.decomposition import PCA
 
 # sortable/searchable tables (R DT::datatable-style); self-installs in Colab
 try:
@@ -110,6 +111,35 @@ def fig_scree(inertias, sils=None):
         axes[1].set(xlabel="K", ylabel="Silhouette (higher = cleaner)",
                     title="Silhouette — cross-check for K")
         axes[1].grid(alpha=.3)
+    fig.tight_layout()
+    return fig
+
+
+def fig_biplot(Xz, labels, features):
+    """PCA 2-D map of the clustering: dots = sessions (by segment),
+    arrows = basis variables (direction/strength of association)."""
+    pca = PCA(n_components=2)
+    Z = pca.fit_transform(Xz)
+    ev = pca.explained_variance_ratio_
+    fig, ax = plt.subplots(figsize=(7.5, 6.5))
+    for c in np.unique(labels):
+        ax.scatter(Z[labels == c, 0], Z[labels == c, 1], s=30, alpha=.8,
+                   label=f"segment {c}")
+    load = pca.components_.T * np.sqrt(pca.explained_variance_)
+    lim = float(np.abs(Z).max())
+    scale = 0.85 * lim / float(np.abs(load).max())
+    for j, name in enumerate(features):
+        ax.arrow(0, 0, load[j, 0] * scale, load[j, 1] * scale,
+                 head_width=.025 * scale, color="k", alpha=.6)
+        ax.text(load[j, 0] * scale * 1.08, load[j, 1] * scale * 1.08,
+                name, fontsize=8)
+    ax.set(xlabel=f"PC1 ({ev[0]:.0%} of variance)",
+           ylabel=f"PC2 ({ev[1]:.0%} of variance)",
+           title="PCA biplot — 2-D projection of the K-Means solution")
+    ax.legend(fontsize=8); ax.grid(alpha=.3)
+    ax.axhline(0, c="grey", lw=.5); ax.axvline(0, c="grey", lw=.5)
+    m = lim * 1.15
+    ax.set_xlim(-m, m); ax.set_ylim(-m, m)
     fig.tight_layout()
     return fig
 
@@ -332,6 +362,15 @@ def _on_run(btn):
             "seagreen")
 
 
+def _on_biplot(btn):
+    if "labels" not in _S:
+        _status("Run K-Means first (Scree & K tab).", "crimson"); return
+    with _W["biplot_out"]:
+        clear_output(wait=True); plt.close("all")
+        display(fig_biplot(_S["Xz"], _S["labels"], _S["features"]))
+    _status("Biplot rendered (PCA view of the same solution).", "seagreen")
+
+
 def _on_download(btn):
     if "result_df" not in _S or _S["result_df"] is None:
         _status("Run K-Means first.", "crimson"); return
@@ -446,6 +485,18 @@ def launch_app():
                      "prompt:"),
         _W["simp_box"]])
 
+    _W["btn_biplot"] = widgets.Button(description="Show biplot",
+                                      button_style="info")
+    _W["btn_biplot"].on_click(_on_biplot)
+    _W["biplot_out"] = widgets.Output()
+    tab_bip = widgets.VBox([
+        widgets.HTML("PCA biplot — a 2-D projection of the SAME clustering "
+                     "(K-Means ran in full feature space; this is just an "
+                     "eyeball view). Dots = sessions, colored by segment; "
+                     "arrows = basis variables, longer = more separation "
+                     "along that direction:"),
+        _W["btn_biplot"], _W["biplot_out"]])
+
     _W["asg_out"] = widgets.Output()
     _W["btn_dl"] = widgets.Button(description="⬇ Download full assignments CSV",
                                   button_style="success")
@@ -456,10 +507,11 @@ def launch_app():
                      "data via the download button:"),
         _W["asg_out"], _W["btn_dl"]])
 
-    tabs = widgets.Tab(children=[tab_data, tab_scree, tab_cent, tab_simp,
-                                 tab_asg])
+    tabs = widgets.Tab(children=[tab_data, tab_scree, tab_cent, tab_bip,
+                                 tab_simp, tab_asg])
     for i, t in enumerate(["1 · Data", "2 · Scree & K", "3 · Centroids",
-                           "4 · Simplified", "5 · Assignments"]):
+                           "4 · Biplot", "5 · Simplified",
+                           "6 · Assignments"]):
         tabs.set_title(i, t)
 
     _W["status"] = widgets.HTML("<i>Upload a CSV to begin.</i>")
