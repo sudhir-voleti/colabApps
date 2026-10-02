@@ -4,21 +4,23 @@
  segmentation_app.py  —  Generic K-Means Segmentation App (Colab)
  Repo: https://github.com/sudhir-voleti/colabApps/
 ---------------------------------------------------------------------
- Colab setup cell (paste as-is):
+ Colab setup cell (paste as-is; bump ?v= after each repo update):
 
    import requests
    URL = ("https://raw.githubusercontent.com/sudhir-voleti/colabApps/"
-          "main/segmentation_app.py?v=1")   # bump ?v= after edits
+          "main/segmentation_app.py?v=5")
    exec(requests.get(URL).text)
    launch_app()
 
- Flow:  upload CSV -> pick metric basis vars + categorical vars
-        (auto one-hot encoded) -> scree plot -> choose K manually
-        -> K-Means -> full raw centroid table + z-centroid table
-        -> simplified maxima/minima table (copy-paste ready for an LLM)
+ Flow:  upload CSV -> tick metric basis vars + categorical vars
+        (auto one-hot) -> scree + silhouette -> choose K manually
+        -> K-Means -> transposed centroid table (segments = columns;
+        sortable) -> text-format simplified maxima/minima table
+        (copy-paste ready) -> 10-row assignment preview + CSV download
 =====================================================================
 """
 import io
+import subprocess
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -26,25 +28,47 @@ from IPython.display import display, clear_output
 import ipywidgets as widgets
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 
-_S = {}      # state: df, num_cols, cat_cols, Xraw, Xz, features, labels ...
-_W = {}      # widget handles
+# sortable/searchable tables (R DT::datatable-style); self-installs in Colab
+try:
+    from itables import show as _show_df
+except Exception:
+    try:
+        import sys as _sys
+        subprocess.run([_sys.executable, "-m", "pip", "install", "-q",
+                        "itables"], check=True, capture_output=True)
+        from itables import show as _show_df
+    except Exception:
+        _show_df = None          # fallback: plain pandas display
+
+_S = {}
+_W = {}
+
+
+def _itable(df):
+    """Display a DataFrame sortable/searchable; fallback to plain."""
+    if _show_df is not None:
+        try:
+            _show_df(df)
+            return
+        except Exception:
+            pass
+    display(df)
 
 
 # ------------------------------------------------------------------ #
-# Engine (widget-free)                                              #
+# Engine                                                            #
 # ------------------------------------------------------------------ #
 
 def parse_upload(upload_value):
-    """Return DataFrame from a widgets.FileUpload value."""
     item = (list(upload_value.values())[0] if isinstance(upload_value, dict)
             else upload_value[0])
     return pd.read_csv(io.BytesIO(item["content"]))
 
 
 def build_design(df, num_cols, cat_cols):
-    """Raw design matrix: numeric columns as-is + one-hot dummies
-    (all levels kept, no drop-first). Returns DataFrame."""
+    """Raw design matrix: numerics as-is + one-hot dummies (all levels)."""
     parts, names = [], []
     if num_cols:
         parts.append(df[list(num_cols)].astype(float).values)
@@ -61,20 +85,31 @@ def build_design(df, num_cols, cat_cols):
     return pd.DataFrame(X, columns=names, index=df.index)
 
 
-def scree_inertias(Xz, kmax=10):
+def scree_stats(Xz, kmax=10):
+    """Inertia for k=1..kmax and silhouette for k=2..kmax."""
     kmax = int(min(kmax, len(Xz) - 1))
-    return [KMeans(n_clusters=k, n_init=10, random_state=42)
-            .fit(Xz).inertia_ for k in range(1, kmax + 1)]
+    inert, sil = [], []
+    for k in range(1, kmax + 1):
+        km = KMeans(n_clusters=k, n_init=10, random_state=42).fit(Xz)
+        inert.append(km.inertia_)
+        if 1 < k < len(Xz):
+            sil.append(silhouette_score(Xz, km.labels_))
+    return inert, sil
 
 
-def fig_scree(inertias):
+def fig_scree(inertias, sils=None):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     ks = range(1, len(inertias) + 1)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(ks, inertias, "o-")
-    ax.set(xlabel="K (number of clusters)",
-           ylabel="Inertia (within-cluster SS)",
-           title="Scree plot — pick K at the sharpest bend")
-    ax.grid(alpha=.3)
+    axes[0].plot(ks, inertias, "o-")
+    axes[0].set(xlabel="K (number of clusters)",
+                ylabel="Inertia (within-cluster SS)",
+                title="Scree / elbow — sharpest bend")
+    axes[0].grid(alpha=.3)
+    if sils:
+        axes[1].plot(range(2, 2 + len(sils)), sils, "s-", color="green")
+        axes[1].set(xlabel="K", ylabel="Silhouette (higher = cleaner)",
+                    title="Silhouette — cross-check for K")
+        axes[1].grid(alpha=.3)
     fig.tight_layout()
     return fig
 
@@ -85,7 +120,6 @@ def fit_kmeans(Xz, k):
 
 
 def raw_profile(df, num_cols, labels):
-    """Cluster means on the original scale: numeric means + size/pct."""
     prof = (df[list(num_cols)].astype(float).groupby(labels).mean().round(2)
             if num_cols else pd.DataFrame(index=sorted(set(labels))))
     prof.insert(0, "pct", (np.bincount(labels) / len(labels) * 100).round(1))
@@ -94,13 +128,11 @@ def raw_profile(df, num_cols, labels):
 
 
 def z_centroids(Xz_df, labels):
-    zc = Xz_df.groupby(labels).mean().round(2)
-    return zc.reset_index(names="segment")
+    return Xz_df.groupby(labels).mean().round(2).reset_index(names="segment")
 
 
 def simplified_table(zc, size_map):
-    """3-column LLM-ready table: where each segment attains the
-    column-wise max / min of the z-score centroids."""
+    """Where each segment attains the column-wise max / min (z-scale)."""
     feats = [c for c in zc.columns if c != "segment"]
     mx, mn = zc[feats].max(), zc[feats].min()
     rows = []
@@ -114,7 +146,6 @@ def simplified_table(zc, size_map):
 
 
 def cat_shares(df, cat_cols, labels):
-    """Level shares within each segment (for profiling context)."""
     tabs = []
     for c in cat_cols:
         t = (pd.crosstab(labels, df[c].astype(str), normalize="index") * 100
@@ -125,36 +156,30 @@ def cat_shares(df, cat_cols, labels):
     return pd.concat(tabs, ignore_index=True) if tabs else None
 
 
-def _render_centroids(change=None):
-    """Toggle the centroid table between raw units and z-score units.
-    Same clusters either way: z*sigma + mu == raw cluster mean."""
-    mode = _W["units"].value
-    with _W["cen_out"]:
-        clear_output(wait=True)
-        if "prof" not in _S:
-            print("Run K-Means to see centroids."); return
-        if mode == "raw":
-            print("CENTROID TABLE — original units (means per segment):")
-            display(_S["prof"])
-        else:
-            print("CENTROID TABLE — z-score units (the scale K-Means used):")
-            display(_S["zc"])
-
-
-def copy_text(k, n, simp):
+def simplified_text(k, n, simp):
+    """Plain-text maxima/minima 'table' — nothing truncated, copy-friendly."""
     lines = [f"K-Means segmentation output | K = {k} | n = {n}",
-             "Column legend: MAXIMA = basis variables where this segment "
-             "scores HIGHEST across segments; MINIMA = where it scores "
-             "LOWEST (centroids are z-standardized).", ""]
+             "MAXIMA = basis variables where this segment scores HIGHEST "
+             "across segments; MINIMA = where it scores LOWEST "
+             "(centroids are z-standardized).", ""]
     for _, r in simp.iterrows():
-        lines.append(f"Segment {r['segment_num']} (n={r['size']}): "
-                     f"MAXIMA: {r['maxima_basis']} | "
-                     f"MINIMA: {r['minima_basis']}")
+        lines.append(f"SEGMENT {r['segment_num']} (n={r['size']})")
+        lines.append(f"  MAXIMA: {r['maxima_basis']}")
+        lines.append(f"  MINIMA: {r['minima_basis']}")
+        lines.append("")
     return "\n".join(lines)
 
 
+def transpose_centroids(tab, name):
+    """segments -> columns, basis variables -> rows (fits the screen)."""
+    t = tab.set_index("segment").T
+    t.columns = [f"segment_{c}" for c in t.columns]
+    t.index.name = name
+    return t.reset_index()
+
+
 # ------------------------------------------------------------------ #
-# Widget handlers                                                   #
+# Handlers                                                          #
 # ------------------------------------------------------------------ #
 
 def _status(msg, color="#333"):
@@ -171,7 +196,6 @@ def _on_load(btn):
     df = _S["df"]
     _S["num_cols"] = list(df.select_dtypes(include=np.number).columns)
     _S["cat_cols"] = [c for c in df.columns if c not in _S["num_cols"]]
-    # ID-like columns (one level per row) must NOT become dummies
     low_card, high_card = [], []
     for c in _S["cat_cols"]:
         if df[c].nunique() <= min(10, max(2, len(df) // 5)):
@@ -179,13 +203,12 @@ def _on_load(btn):
         else:
             high_card.append(c)
     _S["low_card"], _S["high_card"] = low_card, high_card
-    # one checkbox per variable; high-cardinality NOT pre-ticked
     _W["num_boxes"] = [widgets.Checkbox(value=True, description=str(c),
                                         indent=False,
                                         layout=widgets.Layout(width="99%"))
                        for c in _S["num_cols"]]
-    _W["cat_boxes"] = [widgets.Checkbox(value=(c in low_card), description=str(c),
-                                        indent=False,
+    _W["cat_boxes"] = [widgets.Checkbox(value=(c in low_card),
+                                        description=str(c), indent=False,
                                         layout=widgets.Layout(width="99%"))
                        for c in _S["cat_cols"]]
     _W["num_sel_box"].children = (widgets.VBox(
@@ -202,11 +225,11 @@ def _on_load(btn):
         print(f"Text/categorical columns ({len(_S['cat_cols'])}): "
               f"{', '.join(_S['cat_cols']) or 'none'}")
         if high_card:
-            print(f"! NOT pre-selected (ID-like, one level per row -> would "
+            print(f"! NOT pre-ticked (ID-like, one level per row -> would "
                   f"create {sum(df[c].nunique() for c in high_card)} dummy "
                   f"columns and break clustering): {', '.join(high_card)}")
         display(df.head(8))
-    _status("CSV loaded. Review selections below, then press "
+    _status("CSV loaded. Review ticks below, then press "
             "<b>Prepare data</b>.", "seagreen")
 
 
@@ -214,7 +237,7 @@ def _on_prepare(btn):
     num = [b.description for b in _W.get("num_boxes", []) if b.value]
     cat = [b.description for b in _W.get("cat_boxes", []) if b.value]
     if not (num or cat):
-        _status("Pick at least one basis variable.", "crimson"); return
+        _status("Tick at least one basis variable.", "crimson"); return
     try:
         Xraw = build_design(_S["df"], num, cat)
     except ValueError as e:
@@ -240,13 +263,28 @@ def _on_prepare(btn):
 def _on_scree(btn):
     if "Xz" not in _S:
         _status("Prepare data first (Data tab).", "crimson"); return
-    inert = scree_inertias(_S["Xz"])
+    inert, sils = scree_stats(_S["Xz"])
     _S["inertias"] = inert
     with _W["scree_out"]:
         clear_output(wait=True); plt.close("all")
-        display(fig_scree(inert)); plt.show()
-    _status("Read the sharpest bend to choose K, then press "
-            "<b>Run K-Means</b>.", "seagreen")
+        display(fig_scree(inert, sils))
+    _status("Read the sharpest bend (cross-check the silhouette panel), "
+            "set K, then press <b>Run K-Means</b>.", "seagreen")
+
+
+def _render_centroids(change=None):
+    """Toggle the transposed centroid table between raw and z units.
+    Same clusters either way: z*sigma + mu == raw cluster mean."""
+    mode = _W["units"].value
+    with _W["cen_out"]:
+        clear_output(wait=True)
+        if "prof_t" not in _S:
+            print("Run K-Means to see centroids."); return
+        unit_txt = ("original units" if mode == "raw"
+                    else "z-score units, the scale K-Means used")
+        print(f"CENTROID TABLE — segments are COLUMNS, basis variables are "
+              f"rows ({unit_txt}):")
+        _itable(_S["prof_t"] if mode == "raw" else _S["zc_t"])
 
 
 def _on_run(btn):
@@ -261,33 +299,43 @@ def _on_run(btn):
     Xz_df = pd.DataFrame(_S["Xz"], columns=_S["features"])
     prof = raw_profile(_S["df"], _S["num_cols"], labels)
     zc = z_centroids(Xz_df, labels)
-    simp = simplified_table(zc.set_index("segment").reset_index(),
-                            dict(zip(zc["segment"], prof["size"])))
-    _S["simp"] = simp
+    simp = simplified_table(zc, dict(zip(zc["segment"], prof["size"])))
+    _S["prof_t"] = transpose_centroids(prof, "basis_variable")
+    _S["zc_t"] = transpose_centroids(zc, "basis_variable")
     shares = cat_shares(_S["df"], _S["cat_cols"], labels)
+    _S["result_df"] = None
 
-    _S.update(prof=prof, zc=zc, simp=simp)
     _render_centroids()
-    with _W["res_out"]:
+    with _W["shares_out"]:
+        clear_output(wait=True)
+        if shares is not None:
+            print("CATEGORICAL LEVEL SHARES WITHIN SEGMENT (%):")
+            _itable(shares)
+        else:
+            print("(no categorical variables selected)")
+    _W["simp_box"].value = simplified_text(k, len(labels), simp)
+    preview = _S["df"].head(10).copy()
+    preview.insert(0, "segment", labels[:10])
+    counts = (pd.Series(labels, name="segment").value_counts()
+              .rename_axis("segment").reset_index(name="rows"))
+    with _W["asg_out"]:
         clear_output(wait=True)
         print(f"K-Means | K = {k} | n = {len(labels)} "
               f"| inertia = {km.inertia_:.1f}")
-        print("\nSIMPLIFIED TABLE — maxima/minima basis per segment "
-              "(LLM-ready):")
-        display(simp)
-        if shares is not None:
-            print("\nCATEGORICAL LEVEL SHARES WITHIN SEGMENT (%):")
-            display(shares)
-    _W["copy"].value = copy_text(k, len(labels), simp)
-    _status("Done. Copy the text box below into your AI for the "
-            "interpretation exercise.", "seagreen")
+        print("\nRows per segment:")
+        _itable(counts)
+        print("\nAssignment preview (first 10 rows):")
+        _itable(preview)
+    _S["result_df"] = _S["df"].copy()
+    _S["result_df"]["segment"] = labels
+    _status("Done. Check Centroids, Simplified, and Assignments tabs.",
+            "seagreen")
 
 
 def _on_download(btn):
-    if "labels" not in _S:
+    if "result_df" not in _S or _S["result_df"] is None:
         _status("Run K-Means first.", "crimson"); return
-    out = _S["df"].copy(); out["segment"] = _S["labels"]
-    out.to_csv("segment_assignments.csv", index=False)
+    _S["result_df"].to_csv("segment_assignments.csv", index=False)
     try:
         from google.colab import files
         files.download("segment_assignments.csv")
@@ -302,6 +350,11 @@ def _on_download(btn):
 
 def launch_app():
     style = {"description_width": "180px"}
+    try:                                   # sortable tables (itables)
+        from itables import init_notebook_mode
+        init_notebook_mode(all_interactive=False)
+    except Exception:
+        pass
 
     _W["upload"] = widgets.FileUpload(accept=".csv", multiple=False,
                                       description="CSV")
@@ -327,11 +380,6 @@ def launch_app():
         return widgets.HBox([ba, bc])
     _W["num_btns"] = _mk_btns("num_boxes")
     _W["cat_btns"] = _mk_btns("cat_boxes")
-    _W["units"] = widgets.ToggleButtons(
-        options=[("Raw units", "raw"), ("Z-scores", "z")],
-        value="raw", description="Centroid units:")
-    _W["units"].observe(_render_centroids, names="value")
-    _W["cen_out"] = widgets.Output()
     _W["std"] = widgets.Checkbox(
         value=True, indent=False, style=style,
         description="Standardize before clustering (recommended)")
@@ -344,15 +392,15 @@ def launch_app():
         widgets.HTML("<b>1.</b> Upload + inspect:"),
         widgets.HBox([_W["upload"], _W["btn_load"]]),
         _W["data_out"],
-        widgets.HTML("<b>2.</b> Select basis variables. Metric vars enter "
-                     "the distance as numbers; categorical vars are "
-                     "one-hot encoded as 0/1 dummies (all levels kept)."),
+        widgets.HTML("<b>2.</b> Select basis variables:"),
         widgets.HTML("<b>Metric basis variables</b> — tick to include in "
                      "clustering:"),
         _W["num_sel_box"], _W["num_btns"],
         widgets.HTML("<b>Categorical variables</b> — ticked ones are one-hot "
                      "encoded as 0/1 dummies:"),
         _W["cat_sel_box"], _W["cat_btns"],
+        widgets.HTML("<small>Tip: untick ID-like columns (session_id) and any "
+                     "variable that is not a basis for similarity.</small>"),
         _W["std"], _W["btn_prep"],
         _W["prep_out"]])
 
@@ -367,32 +415,52 @@ def launch_app():
     _W["btn_run"].on_click(_on_run)
     tab_scree = widgets.VBox([
         widgets.HTML("<b>3.</b> Scree plot — look for the sharpest bend "
-                     "(elbow) in inertia:"),
+                     "(elbow) in inertia, cross-checked by the silhouette "
+                     "panel (its peak often corrects the elbow's bias "
+                     "toward K=2):"),
         _W["btn_scree"], _W["scree_out"],
-        widgets.HTML("<b>4.</b> Set K from the elbow:"),
+        widgets.HTML("<b>4.</b> Set K from the plots:"),
         _W["k"], _W["btn_run"]])
 
-    _W["res_out"] = widgets.Output()
-    _W["copy"] = widgets.Textarea(
-        value="Run K-Means to generate the copy-paste summary.",
-        layout=widgets.Layout(width="95%", height="160px"))
-    _W["btn_dl"] = widgets.Button(description="⬇ segment assignments CSV")
-    _W["btn_dl"].on_click(_on_download)
-    tab_res = widgets.VBox([
-        widgets.HTML("<b>5.</b> Centroid table — toggle units (same clusters "
-                     "either way; Raw = z &times; SD + mean):"),
+    _W["units"] = widgets.ToggleButtons(
+        options=[("Raw units", "raw"), ("Z-scores", "z")],
+        value="raw", description="Centroid units:")
+    _W["units"].observe(_render_centroids, names="value")
+    _W["cen_out"] = widgets.Output()
+    _W["shares_out"] = widgets.Output()
+    tab_cent = widgets.VBox([
+        widgets.HTML("<b>5.</b> Centroid table — segments are columns, "
+                     "basis variables are rows (click any column header to "
+                     "sort). Toggle units — same clusters either way; "
+                     "Raw = z &times; SD + mean:"),
         _W["units"], _W["cen_out"],
-        widgets.HTML("<b>6.</b> Simplified maxima/minima table + categorical "
-                     "shares:"),
-        _W["res_out"],
-        widgets.HTML("<b>Copy-paste block for your AI interpretation "
-                     "exercise</b> (click in, Ctrl/Cmd-A, copy):"),
-        _W["copy"], _W["btn_dl"]])
+        widgets.HTML("<hr>"), _W["shares_out"]])
 
-    tabs = widgets.Tab(children=[tab_data, tab_scree, tab_res])
-    tabs.set_title(0, "1 · Data")
-    tabs.set_title(1, "2 · Scree & K")
-    tabs.set_title(2, "3 · Results")
+    _W["simp_box"] = widgets.Textarea(
+        value="Run K-Means to generate the simplified maxima/minima table.",
+        layout=widgets.Layout(width="95%", height="300px"))
+    tab_simp = widgets.VBox([
+        widgets.HTML("<b>6.</b> Simplified table (text format — nothing "
+                     "truncated). Click in the box, Ctrl/Cmd-A to select "
+                     "all, copy, and paste into your AI interpretation "
+                     "prompt:"),
+        _W["simp_box"]])
+
+    _W["asg_out"] = widgets.Output()
+    _W["btn_dl"] = widgets.Button(description="⬇ Download full assignments CSV",
+                                  button_style="success")
+    _W["btn_dl"].on_click(_on_download)
+    tab_asg = widgets.VBox([
+        widgets.HTML("<b>7.</b> Segment assignments — row counts per segment "
+                     "and a 10-row preview (click headers to sort). Full "
+                     "data via the download button:"),
+        _W["asg_out"], _W["btn_dl"]])
+
+    tabs = widgets.Tab(children=[tab_data, tab_scree, tab_cent, tab_simp,
+                                 tab_asg])
+    for i, t in enumerate(["1 · Data", "2 · Scree & K", "3 · Centroids",
+                           "4 · Simplified", "5 · Assignments"]):
+        tabs.set_title(i, t)
 
     _W["status"] = widgets.HTML("<i>Upload a CSV to begin.</i>")
     display(widgets.VBox([
