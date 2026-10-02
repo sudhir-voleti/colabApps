@@ -125,6 +125,22 @@ def cat_shares(df, cat_cols, labels):
     return pd.concat(tabs, ignore_index=True) if tabs else None
 
 
+def _render_centroids(change=None):
+    """Toggle the centroid table between raw units and z-score units.
+    Same clusters either way: z*sigma + mu == raw cluster mean."""
+    mode = _W["units"].value
+    with _W["cen_out"]:
+        clear_output(wait=True)
+        if "prof" not in _S:
+            print("Run K-Means to see centroids."); return
+        if mode == "raw":
+            print("CENTROID TABLE — original units (means per segment):")
+            display(_S["prof"])
+        else:
+            print("CENTROID TABLE — z-score units (the scale K-Means used):")
+            display(_S["zc"])
+
+
 def copy_text(k, n, simp):
     lines = [f"K-Means segmentation output | K = {k} | n = {n}",
              "Column legend: MAXIMA = basis variables where this segment "
@@ -239,14 +255,12 @@ def _on_run(btn):
     _S["simp"] = simp
     shares = cat_shares(_S["df"], _S["cat_cols"], labels)
 
+    _S.update(prof=prof, zc=zc, simp=simp)
+    _render_centroids()
     with _W["res_out"]:
         clear_output(wait=True)
         print(f"K-Means | K = {k} | n = {len(labels)} "
               f"| inertia = {km.inertia_:.1f}")
-        print("\nFULL CENTROID TABLE (raw-scale means):")
-        display(prof)
-        print("\nZ-SCORE CENTROIDS (standardized):")
-        display(zc)
         print("\nSIMPLIFIED TABLE — maxima/minima basis per segment "
               "(LLM-ready):")
         display(simp)
@@ -291,6 +305,21 @@ def launch_app():
     _W["sel_cat"] = widgets.SelectMultiple(
         description="Categorical (→ dummies)", rows=5, style=style,
         layout=widgets.Layout(width="560px"))
+    def _mk_btns(sel):
+        ba = widgets.Button(description="Select all",
+                            layout=widgets.Layout(width="95px"))
+        bc = widgets.Button(description="Clear",
+                            layout=widgets.Layout(width="70px"))
+        ba.on_click(lambda b: setattr(sel, "value", tuple(sel.options)))
+        bc.on_click(lambda b: setattr(sel, "value", ()))
+        return widgets.HBox([ba, bc])
+    _W["num_btns"] = _mk_btns(_W["sel_num"])
+    _W["cat_btns"] = _mk_btns(_W["sel_cat"])
+    _W["units"] = widgets.ToggleButtons(
+        options=[("Raw units", "raw"), ("Z-scores", "z")],
+        value="raw", description="Centroid units:")
+    _W["units"].observe(_render_centroids, names="value")
+    _W["cen_out"] = widgets.Output()
     _W["std"] = widgets.Checkbox(
         value=True, indent=False, style=style,
         description="Standardize before clustering (recommended)")
@@ -306,7 +335,14 @@ def launch_app():
         widgets.HTML("<b>2.</b> Select basis variables. Metric vars enter "
                      "the distance as numbers; categorical vars are "
                      "one-hot encoded as 0/1 dummies (all levels kept)."),
-        _W["sel_num"], _W["sel_cat"], _W["std"], _W["btn_prep"],
+        _W["sel_num"], _W["num_btns"],
+        widgets.HTML("<small>Tip: Ctrl-click (&#8984;-click on Mac) toggles "
+                     "single items — or Clear, then click just the ones you "
+                     "want.</small>"),
+        _W["sel_cat"], _W["cat_btns"],
+        widgets.HTML("<small>Categorical selections become 0/1 dummy columns "
+                     "in the clustering.</small>"),
+        _W["std"], _W["btn_prep"],
         _W["prep_out"]])
 
     _W["btn_scree"] = widgets.Button(description="Show scree plot",
@@ -332,8 +368,11 @@ def launch_app():
     _W["btn_dl"] = widgets.Button(description="⬇ segment assignments CSV")
     _W["btn_dl"].on_click(_on_download)
     tab_res = widgets.VBox([
-        widgets.HTML("<b>5.</b> Outputs — full centroids (raw), z-centroids, "
-                     "simplified maxima/minima table, categorical shares:"),
+        widgets.HTML("<b>5.</b> Centroid table — toggle units (same clusters "
+                     "either way; Raw = z &times; SD + mean):"),
+        _W["units"], _W["cen_out"],
+        widgets.HTML("<b>6.</b> Simplified maxima/minima table + categorical "
+                     "shares:"),
         _W["res_out"],
         widgets.HTML("<b>Copy-paste block for your AI interpretation "
                      "exercise</b> (click in, Ctrl/Cmd-A, copy):"),
