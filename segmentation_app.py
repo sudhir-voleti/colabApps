@@ -179,10 +179,21 @@ def _on_load(btn):
         else:
             high_card.append(c)
     _S["low_card"], _S["high_card"] = low_card, high_card
-    _W["sel_num"].options = _S["num_cols"]
-    _W["sel_num"].value = tuple(_S["num_cols"])
-    _W["sel_cat"].options = _S["cat_cols"]
-    _W["sel_cat"].value = tuple(low_card)      # high-cardinality NOT pre-selected
+    # one checkbox per variable; high-cardinality NOT pre-ticked
+    _W["num_boxes"] = [widgets.Checkbox(value=True, description=str(c),
+                                        indent=False,
+                                        layout=widgets.Layout(width="99%"))
+                       for c in _S["num_cols"]]
+    _W["cat_boxes"] = [widgets.Checkbox(value=(c in low_card), description=str(c),
+                                        indent=False,
+                                        layout=widgets.Layout(width="99%"))
+                       for c in _S["cat_cols"]]
+    _W["num_sel_box"].children = (widgets.VBox(
+        _W["num_boxes"],
+        layout=widgets.Layout(max_height="240px", overflow_y="auto")),)
+    _W["cat_sel_box"].children = (widgets.VBox(
+        _W["cat_boxes"],
+        layout=widgets.Layout(max_height="160px", overflow_y="auto")),)
     with _W["data_out"]:
         clear_output(wait=True)
         print(f"Loaded: {df.shape[0]} rows x {df.shape[1]} columns")
@@ -200,8 +211,8 @@ def _on_load(btn):
 
 
 def _on_prepare(btn):
-    num = list(_W["sel_num"].value)
-    cat = list(_W["sel_cat"].value)
+    num = [b.description for b in _W.get("num_boxes", []) if b.value]
+    cat = [b.description for b in _W.get("cat_boxes", []) if b.value]
     if not (num or cat):
         _status("Pick at least one basis variable.", "crimson"); return
     try:
@@ -299,22 +310,23 @@ def launch_app():
     _W["btn_load"].on_click(_on_load)
 
     _W["data_out"] = widgets.Output()
-    _W["sel_num"] = widgets.SelectMultiple(description="Metric basis vars",
-                                           rows=10, style=style,
-                                           layout=widgets.Layout(width="560px"))
-    _W["sel_cat"] = widgets.SelectMultiple(
-        description="Categorical (→ dummies)", rows=5, style=style,
-        layout=widgets.Layout(width="560px"))
-    def _mk_btns(sel):
+    _W["num_sel_box"] = widgets.VBox()   # checkbox containers, filled on load
+    _W["cat_sel_box"] = widgets.VBox()
+
+    def _set_boxes(boxes, v):
+        for b in boxes:
+            b.value = v
+
+    def _mk_btns(key):
         ba = widgets.Button(description="Select all",
                             layout=widgets.Layout(width="95px"))
         bc = widgets.Button(description="Clear",
                             layout=widgets.Layout(width="70px"))
-        ba.on_click(lambda b: setattr(sel, "value", tuple(sel.options)))
-        bc.on_click(lambda b: setattr(sel, "value", ()))
+        ba.on_click(lambda b: _set_boxes(_W.get(key, []), True))
+        bc.on_click(lambda b: _set_boxes(_W.get(key, []), False))
         return widgets.HBox([ba, bc])
-    _W["num_btns"] = _mk_btns(_W["sel_num"])
-    _W["cat_btns"] = _mk_btns(_W["sel_cat"])
+    _W["num_btns"] = _mk_btns("num_boxes")
+    _W["cat_btns"] = _mk_btns("cat_boxes")
     _W["units"] = widgets.ToggleButtons(
         options=[("Raw units", "raw"), ("Z-scores", "z")],
         value="raw", description="Centroid units:")
@@ -335,13 +347,12 @@ def launch_app():
         widgets.HTML("<b>2.</b> Select basis variables. Metric vars enter "
                      "the distance as numbers; categorical vars are "
                      "one-hot encoded as 0/1 dummies (all levels kept)."),
-        _W["sel_num"], _W["num_btns"],
-        widgets.HTML("<small>Tip: Ctrl-click (&#8984;-click on Mac) toggles "
-                     "single items — or Clear, then click just the ones you "
-                     "want.</small>"),
-        _W["sel_cat"], _W["cat_btns"],
-        widgets.HTML("<small>Categorical selections become 0/1 dummy columns "
-                     "in the clustering.</small>"),
+        widgets.HTML("<b>Metric basis variables</b> — tick to include in "
+                     "clustering:"),
+        _W["num_sel_box"], _W["num_btns"],
+        widgets.HTML("<b>Categorical variables</b> — ticked ones are one-hot "
+                     "encoded as 0/1 dummies:"),
+        _W["cat_sel_box"], _W["cat_btns"],
         _W["std"], _W["btn_prep"],
         _W["prep_out"]])
 
