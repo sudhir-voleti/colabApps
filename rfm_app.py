@@ -152,6 +152,29 @@ def seg_copy_text(rfm, sizes, actions, bins, snap):
     return "\n".join(lines)
 
 
+def compute_deltas(rfm_a, rfm_b):
+    """Per-customer movement between snapshots: scores at A and B + deltas."""
+    m = rfm_a[["customer_id", "rfm_score", "R", "F", "M"]].merge(
+        rfm_b[["customer_id", "rfm_score", "R", "F", "M"]],
+        on="customer_id", suffixes=("_A", "_B"))
+    for d in "RFM":
+        m[f"d_{d}"] = m[f"{d}_B"] - m[f"{d}_A"]
+    m["d_total"] = m["d_R"] + m["d_F"] + m["d_M"]
+    return m
+
+
+def apply_rule(d, kind, frm="", to="", dim="total", n=2):
+    """kind='seg': exact cell -> cell move; kind='drop': d_dim <= -n."""
+    if kind == "seg":
+        fa = [int(x) for x in str(frm)]
+        ta = [int(x) for x in str(to)]
+        mask = ((d[["R_A", "F_A", "M_A"]].values == fa).all(axis=1)
+                & (d[["R_B", "F_B", "M_B"]].values == ta).all(axis=1))
+        return d[mask]
+    col = {"R": "d_R", "F": "d_F", "M": "d_M", "total": "d_total"}[dim]
+    return d[d[col] <= -n]
+
+
 def month_ends(txn):
     p = pd.PeriodIndex(pd.to_datetime(txn["date"]).unique(), freq="M")
     return sorted(p.to_timestamp(how="end").normalize().unique())
@@ -369,6 +392,9 @@ def _on_migrate(btn):
     rfm_b, _ = compute_rfm(_S["txn"], bins=bins, snapshot=B)
     ct, m = migration_matrix(rfm_a, rfm_b)
     _S["mig"] = (ct, m)
+    _S["deltas"] = compute_deltas(rfm_a, rfm_b)
+    _W["rule_from"].options = sorted(rfm_a["rfm_score"].unique())
+    _W["rule_to"].options = sorted(rfm_b["rfm_score"].unique())
     diag = np.diag(pd.crosstab(m["rfm_score_A"], m["rfm_score_B"])
                    .reindex(index=ct["from_A"], columns=ct["from_A"])
                    .fillna(0).values).sum() if len(m) else 0
@@ -389,6 +415,67 @@ def _on_migrate(btn):
              "business reasons, and recommend one action per major flow."]
     _W["mig_copy"].value = "\n".join(lines)
     _status("Migration computed.", "seagreen")
+
+
+def _on_rule_kind(change):
+    _W["seg_rule_box"].layout.display = "" if change["new"] == "seg" else "none"
+    _W["drop_rule_box"].layout.display = "" if change["new"] == "drop" else "none"
+
+
+def _on_rule(btn):
+    if "deltas" not in _S:
+        _status("Compute migration first (Dynamic tab).", "crimson"); return
+    kind = _W["rule_kind"].value
+    hits = apply_rule(_S["deltas"], kind, frm=_W["rule_from"].value,
+                      to=_W["rule_to"].value, dim=_W["drop_dim"].value,
+                      n=_W["drop_n"].value)
+    _S["hits"] = hits
+    _S["hits_desc"] = (f"{_W['rule_from'].value} -> {_W['rule_to'].value}"
+                       if kind == "seg"
+                       else f"{_W['drop_dim'].value} dropped >= "
+                            f"{_W['drop_n'].value}")
+    with _W["rule_out"]:
+        clear_output(wait=True)
+        print(f"RULE: {_S['hits_desc']} | customers matched: {len(hits)}")
+        if len(hits):
+            cols = ["customer_id", "rfm_score_A", "rfm_score_B",
+                    "d_R", "d_F", "d_M"]
+            _itable(hits[cols].sort_values("d_total"))
+            print("(use the download button to export this audience)")
+    _status(f"Rule matched {len(hits)} customers.", "seagreen")
+
+
+def _on_dl_hits(btn):
+    if "hits" not in _S:
+        _status("Run a rule first.", "crimson"); return
+    fname = "trigger_audience.csv"
+    _S["hits"].to_csv(fname, index=False)
+    try:
+        from google.colab import files
+        files.download(fname)
+    except Exception:
+        _status(f"Saved '{fname}' in the Colab file pane.", "seagreen")
+
+
+def _on_add_plan(btn):
+    if "hits" not in _S:
+        _status("Run a rule first.", "crimson"); return
+    plan = _S.setdefault("plan", [])
+    plan.append({"trigger": _S["hits_desc"],
+                 "customers": len(_S["hits"]),
+                 "intervention": _W["interv"].value.strip() or "(none)"})
+    df = pd.DataFrame(plan)
+    with _W["plan_out"]:
+        clear_output(wait=True)
+        print("CAMPAIGN PLAN (trigger -> audience size -> intervention):")
+        _itable(df)
+    _W["plan_copy"].value = (
+        "Campaign plan (RFM trigger rules):\n\n"
+        + df.to_string(index=False)
+        + "\n\nTask: for each rule, judge whether the intervention fits "
+          "the trigger, is margin-safe, and is measurable. Suggest one "
+          "improvement per rule.")
+    _status("Rule added to campaign plan.", "seagreen")
 
 
 def _on_download(btn):
@@ -517,10 +604,61 @@ def launch_app():
         widgets.HTML("<small>Copy block for the AI exercise:</small>"),
         _W["mig_copy"]])
 
+    _W["rule_kind"] = widgets.ToggleButtons(
+        options=[("Segment -> segment", "seg"),
+                 ("Score drop", "drop")],
+        value="seg", description="Rule type:")
+    _W["rule_kind"].observe(_on_rule_kind, names="value")
+    _W["rule_from"] = widgets.Dropdown(options=[], description="From cell",
+                                       style=style,
+                                       layout=widgets.Layout(width="320px"))
+    _W["rule_to"] = widgets.Dropdown(options=[], description="To cell",
+                                     style=style,
+                                     layout=widgets.Layout(width="320px"))
+    _W["seg_rule_box"] = widgets.VBox([_W["rule_from"], _W["rule_to"]])
+    _W["drop_dim"] = widgets.Dropdown(
+        options=[("R+F+M total", "total"), ("R only", "R"),
+                 ("F only", "F"), ("M only", "M")],
+        value="total", description="Which score", style=style,
+        layout=widgets.Layout(width="320px"))
+    _W["drop_n"] = widgets.IntSlider(value=2, min=1, max=9, style=style,
+                                     description="Dropped >= (points)")
+    _W["drop_rule_box"] = widgets.VBox([_W["drop_dim"], _W["drop_n"]])
+    _W["drop_rule_box"].layout.display = "none"
+    _W["btn_rule"] = widgets.Button(description="Run query",
+                                    button_style="success")
+    _W["btn_rule"].on_click(_on_rule)
+    _W["rule_out"] = widgets.Output()
+    _W["btn_dl_hits"] = widgets.Button(description="⬇ Download audience CSV")
+    _W["btn_dl_hits"].on_click(_on_dl_hits)
+    _W["interv"] = widgets.Text(value="e.g. send 5% discount coupon",
+                                description="Intervention",
+                                style=style,
+                                layout=widgets.Layout(width="560px"))
+    _W["btn_plan"] = widgets.Button(description="Add rule to campaign plan",
+                                    button_style="info")
+    _W["btn_plan"].on_click(_on_add_plan)
+    _W["plan_out"] = widgets.Output()
+    _W["plan_copy"] = widgets.Textarea(
+        value="Run rules and add them to generate the plan copy block.",
+        layout=widgets.Layout(width="95%", height="200px"))
+    tab_trig = widgets.VBox([
+        widgets.HTML("<b>7.</b> PROGRAMMATIC triggers: query the A->B "
+                     "movement, define the intervention, and export the "
+                     "audience CSV that a campaign tool would consume. "
+                     "(Compute migration in the Dynamic tab first.)"),
+        _W["rule_kind"], _W["seg_rule_box"], _W["drop_rule_box"],
+        _W["btn_rule"], _W["rule_out"],
+        widgets.HBox([_W["interv"], _W["btn_plan"]]), _W["btn_dl_hits"],
+        widgets.HTML("<hr><b>Campaign plan</b> (accumulates below; copy "
+                     "block for the AI exercise):"),
+        _W["plan_out"], _W["plan_copy"]])
+
     tabs = widgets.Tab(children=[tab_data, tab_rfm, tab_plots, tab_seg,
-                                 tab_dyn])
+                                 tab_dyn, tab_trig])
     for i, t in enumerate(["1 · Data", "2 · RFM", "3 · Plots",
-                           "4 · Segments", "5 · Dynamic"]):
+                           "4 · Segments", "5 · Dynamic",
+                           "6 · Triggers"]):
         tabs.set_title(i, t)
 
     _W["status"] = widgets.HTML("<i>Upload a transactions CSV to begin.</i>")
