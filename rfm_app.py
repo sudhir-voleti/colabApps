@@ -440,7 +440,7 @@ def _on_rule(btn):
         if len(hits):
             cols = ["customer_id", "rfm_score_A", "rfm_score_B",
                     "d_R", "d_F", "d_M"]
-            _itable(hits[cols].sort_values("d_total"))
+            _itable(hits.sort_values("d_total")[cols])
             print("(use the download button to export this audience)")
     _status(f"Rule matched {len(hits)} customers.", "seagreen")
 
