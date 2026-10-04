@@ -90,15 +90,16 @@ def build_transactions(df, cust, inv, dates, amt, drop_nonpos=True):
 
 
 def score_bins(s, bins, reverse=False):
-    """Quantile-bin a series into 1..bins (rank-based; robust to ties)."""
-    s = s.astype(float)
-    edges = np.unique(np.quantile(s, np.linspace(0, 1, bins + 1)))
-    n = len(edges) - 1                     # effective #bins after dedup
-    if n < 1:
-        return pd.Series(np.ones(len(s), dtype=int), index=s.index)
-    idx = np.clip(np.digitize(s, edges[1:-1]), 0, n - 1)
-    sc = (n - idx) if reverse else (idx + 1)   # R reversed: recent = high
-    return pd.Series(sc, index=s.index, dtype=int)
+    """Equal-frequency bins 1..bins by rank (robust to tied values, e.g.
+    a threshold-filtered minimum). Ties are broken arbitrarily, so each
+    score gets ~len/bins customers regardless of value clustering."""
+    n = len(s)
+    r = s.astype(float).rank(method="first")
+    sc = np.floor((r - 1) * bins / n).astype(int) + 1
+    sc = pd.Series(sc, index=s.index)
+    if reverse:                                # R: most recent = highest
+        sc = bins + 1 - sc
+    return sc.astype(int)
 
 
 def compute_rfm(txn, bins=4, snapshot=None):
@@ -350,12 +351,19 @@ def _on_rfm(btn):
         print(f"RFM as of {snap.date()} | bins = {bins} | "
               f"customers = {len(rfm)}")
         _itable(rfm.sort_values(["R", "F", "M"], ascending=False))
-        print("\nScore boundaries (quartile cut-points):")
+        print("\nAbsolute quartile cut-points (reference only):")
         for col, s in [("R", "recency_days"), ("F", "txn_count"),
                        ("M", "spend")]:
             q = rfm[s].quantile([0, .25, .5, .75, 1]).round(1).tolist()
             print(f"  {col} ({s}): min={q[0]}, q1={q[1]}, q2={q[2]}, "
                   f"q3={q[3]}, max={q[4]}")
+            edges = np.unique(np.quantile(rfm[s].astype(float),
+                                          np.linspace(0, 1, 5)))
+            if len(edges) - 1 < bins:
+                print(f"  NOTE: {col} has only {len(edges) - 1} distinct "
+                      f"absolute quartiles (tied values, often a filter "
+                      f"artifact). Scores use rank-based equal-frequency "
+                      f"bins, so all scores 1..{bins} still exist.")
     with _W["seg_out"]:
         clear_output(wait=True)
         print("SEGMENT SIZES:")
@@ -556,8 +564,11 @@ def launch_app():
     _W["btn_dl"] = widgets.Button(description="⬇ Download RFM scores CSV")
     _W["btn_dl"].on_click(_on_download)
     tab_rfm = widgets.VBox([
-        widgets.HTML("<b>3.</b> RFM scores per customer (higher = better on "
-                     "each of R, F, M; click headers to sort):"),
+        widgets.HTML("<b>3.</b> RFM scores per customer — higher = better "
+                     "on each of R, F, M. Scores are <b>equal-frequency "
+                     "(rank-based)</b>: each score 1..bins holds ~the same "
+                     "number of customers, robust to tied values from "
+                     "filtered data. Click headers to sort:"),
         _W["bins"], _W["btn_rfm"], _W["rfm_out"], _W["btn_dl"]])
 
     _W["plot_sel"] = widgets.Dropdown(options=list(PLOTS.keys()),
