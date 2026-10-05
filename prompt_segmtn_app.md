@@ -1,34 +1,15 @@
-# Prompt: Build the PCPDM Segmentation App (Colab / ipywidgets)
-
-**What this file is:** a complete, plain-language specification ("prompt") that
-an AI coding assistant can follow to recreate `segmentation_app.py` from
-scratch — the app used in the PCPDM module's VedaFlow caselet. It is written
-for a non-specialist reader: every behavior is described in terms of what the
-user sees and what the app must do, not in code jargon.
-
-**How to use it:** paste the whole block below into your AI workspace
-(preferably in sections if the tool has input limits), or keep it in the
-repo as documentation of what the app does and why.
-
----
-
-## THE PROMPT (paste everything below)
+## Prompt: Build the PCPDM Segmentation App (Colab / ipywidgets)
 
 Build a single self-contained Python file, `segmentation_app.py`, that runs a
 generic K-Means market-segmentation application inside a **Google Colab
 notebook** using **ipywidgets** for the user interface and **matplotlib** for
 plots. The file must define one function, `launch_app()`, which builds and
-displays the whole interface. Students launch it from a Colab cell with:
+displays the whole interface. 
 
-    import requests
-    URL = ("https://raw.githubusercontent.com/<USER>/<REPO>/main/"
-           "segmentation_app.py?v=1")
-    exec(requests.get(URL).text)
-    launch_app()
+I should be able to launch it from a Colab cell by calling the code infrom a Github repository.
 
 ### Audience and design philosophy
-The users are executive-education students with no coding background. Every
-step must be a visible button, dropdown, checkbox, or slider with plain-word
+Every step must be a visible button, dropdown, checkbox, or slider with plain-word
 labels. Nothing should require modifier-key tricks. After every action, show
 a one-line status message in plain English ("Data prepared. Next: show the
 scree plot and pick K."). Guard every action: if a button is pressed out of
