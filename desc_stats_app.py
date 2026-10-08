@@ -1,16 +1,16 @@
 # ============================================================================
 # Session 01 - Descriptive Statistics App
-# Repo : github.com/sudhir-voleti/colabApps  (path: session01/desc_stats_app.py)
-# Data : vrs_retail_weekly.csv + apex_trade_credit.csv in the SAME repo folder
+# Repo : github.com/sudhir-voleti/colabApps  (flat layout - file lives at repo root)
+# Data : vrs_retail_weekly.csv + apex_trade_credit.csv, same repo root
 # Pull : one launcher cell in Colab -
 #        import requests
-#        exec(requests.get("https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/session01/desc_stats_app.py").text)
+#        exec(requests.get("https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/desc_stats_app.py").text)
 # ============================================================================
 
 import pandas as pd
 import matplotlib.pyplot as plt
 
-BASE = "https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/session01"
+BASE = "https://raw.githubusercontent.com/sudhir-voleti/colabApps/main"
 
 # instructor guard: the app must NOT leak the Session-5 confound
 SHOW_WITHIN_TIER_CORR = False
