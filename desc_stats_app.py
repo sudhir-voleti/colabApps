@@ -1,101 +1,206 @@
 # ============================================================================
-# Session 01 - Descriptive Statistics App
-# Repo : github.com/sudhir-voleti/colabApps  (flat layout - file lives at repo root)
-# Data : vrs_retail_weekly.csv + apex_trade_credit.csv (Uploaded via LMS to Colab)
-# Pull : launcher cell in Colab -
-#        import requests
-#        exec(requests.get("https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/desc_stats_app.py").text)
-#        launch_app()
+# Session 01 - Descriptive Statistics App (Generic CSV Upload Engine)
+# Repo : github.com/sudhir-voleti/colabApps
+# Launch code in Colab:
+#   import requests
+#   exec(requests.get("https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/desc_stats_app.py").text)
+#   launch_app()
 # ============================================================================
 
-import os
+import io
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-
-# Instructor guard: the app must NOT leak the Session-5 confound
-SHOW_WITHIN_TIER_CORR = False
-
-def hr(title):
-    print("\n" + "=" * 64 + "\n  " + title + "\n" + "=" * 64)
+import ipywidgets as widgets
+from IPython.display import display, clear_output
 
 def launch_app():
-    # ---------------------------------------------------------------- LOAD ----
-    # Verify files exist in the current Colab working directory
-    if not os.path.exists("vrs_retail_weekly.csv") or not os.path.exists("apex_trade_credit.csv"):
-        print("❌ ERROR: Missing CSV files!")
-        print("Please upload 'vrs_retail_weekly.csv' and 'apex_trade_credit.csv' to the Colab files sidebar on the left, then re-run launch_app().")
-        return
+    # 1. UI Components Setup
+    upload_widget = widgets.FileUpload(
+        accept='.csv',
+        multiple=False,
+        description='Upload CSV',
+        button_style='primary',
+        icon='upload'
+    )
+    
+    out_main = widgets.Output()
+    
+    print("=" * 64)
+    print("  Session 01: Interactive Descriptive Statistics Engine")
+    print("=" * 64)
+    print("Please upload your CSV file to begin analysis:\n")
+    display(upload_widget)
+    display(out_main)
+    
+    # 2. Main Callback on File Upload
+    def on_file_upload(change):
+        with out_main:
+            clear_output()
+            if not upload_widget.value:
+                return
+            
+            # Extract raw uploaded file bytes
+            uploaded_file = list(upload_widget.value.values())[0] if isinstance(upload_widget.value, dict) else upload_widget.value[0]
+            content = uploaded_file['content'] if isinstance(uploaded_file, dict) else uploaded_file.content
+            
+            try:
+                df = pd.read_csv(io.BytesIO(content))
+            except Exception as e:
+                print(f"❌ Error reading CSV file: {e}")
+                return
+            
+            print(f"✅ File successfully loaded! Data Shape: {df.shape[0]} rows × {df.shape[1]} columns.\n")
+            
+            # --- Auto-Detection of Variable Types ---
+            num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            cat_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
+            
+            # Heuristic: Move low-cardinality numerics (<=10 unique values, e.g. Month, Tier ID) to categoricals if helpful
+            for col in num_cols[:]:
+                if df[col].nunique() <= 5 and col not in cat_cols:
+                    cat_cols.append(col)
 
-    vrs  = pd.read_csv("vrs_retail_weekly.csv")     # 104 rows
-    apex = pd.read_csv("apex_trade_credit.csv")     # 1200 rows
+            if not num_cols and not cat_cols:
+                print("❌ No readable numeric or categorical columns found.")
+                return
 
-    assert vrs.shape[0] == 104,   "vrs_retail_weekly.csv looks wrong - check LMS file upload"
-    assert apex.shape[0] == 1200, "apex_trade_credit.csv looks wrong - check LMS file upload"
-    print("✅ Both datasets loaded successfully from local runtime! vrs:", vrs.shape, "| apex:", apex.shape)
+            # --- TAB 1: NUMERIC ANALYTICS ---
+            out_tab1 = widgets.Output()
+            num_dropdown = widgets.Dropdown(options=num_cols, description='Metric:') if num_cols else None
+            
+            def render_numeric_tab(change=None):
+                with out_tab1:
+                    clear_output()
+                    if not num_cols:
+                        print("No numeric columns detected in this dataset.")
+                        return
+                    
+                    col = num_dropdown.value
+                    s = df[col].dropna()
+                    
+                    mean_val = s.mean()
+                    med_val = s.median()
+                    std_val = s.std()
+                    cv_val = std_val / mean_val if mean_val != 0 else np.nan
+                    mode_val = s.mode()[0] if not s.mode().empty else np.nan
+                    
+                    summary_df = pd.DataFrame({
+                        "Metric": [col],
+                        "Mean": [round(mean_val, 2)],
+                        "Median": [round(med_val, 2)],
+                        "Mode": [round(mode_val, 2)],
+                        "Std Dev (Wobble)": [round(std_val, 2)],
+                        "CV (Wobble/Rupee)": [round(cv_val, 3)],
+                        "Min": [round(s.min(), 2)],
+                        "Max": [round(s.max(), 2)],
+                        "Count": [int(s.count())]
+                    })
+                    
+                    print(f"--- Executive Numeric Summary: {col} ---")
+                    display(summary_df)
+                    
+                    # Distribution Plot
+                    fig, ax = plt.subplots(figsize=(7, 3.5))
+                    s.plot(kind='hist', bins=20, alpha=0.5, color='#003366', density=True, ax=ax)
+                    s.plot(kind='kde', color='#D97706', linewidth=2, ax=ax)
+                    ax.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f'Mean ({mean_val:.2f})')
+                    ax.axvline(med_val, color='green', linestyle=':', linewidth=2, label=f'Median ({med_val:.2f})')
+                    ax.set_title(f"Distribution & Skewness Check: {col}", fontsize=11, fontweight='bold')
+                    ax.legend()
+                    plt.tight_layout()
+                    plt.show()
 
-    # =========================================================== PART A =======
-    hr("PART A - Micro-case 1: VRS Retail (we do this together)")
+            if num_dropdown:
+                num_dropdown.observe(render_numeric_tab, names='value')
 
-    print("A1. What the machine sees (first 8 rows):")
-    display(vrs.head(8))
+            # --- TAB 2: CATEGORICAL ANALYTICS ---
+            out_tab2 = widgets.Output()
+            cat_dropdown = widgets.Dropdown(options=cat_cols, description='Category:') if cat_cols else None
+            
+            def render_categorical_tab(change=None):
+                with out_tab2:
+                    clear_output()
+                    if not cat_cols:
+                        print("No categorical columns detected in this dataset.")
+                        return
+                    
+                    col = cat_dropdown.value
+                    s = df[col].astype(str)
+                    
+                    counts = s.value_counts()
+                    props = (s.value_counts(normalize=True) * 100).round(1)
+                    
+                    cat_summary = pd.DataFrame({
+                        "Count": counts,
+                        "Proportion (%)": props
+                    })
+                    
+                    print(f"--- Categorical Breakdown: {col} ---")
+                    display(cat_summary)
+                    
+                    # Category Bar Chart
+                    fig, ax = plt.subplots(figsize=(7, 3.5))
+                    props.plot(kind='bar', color='#003366', ax=ax)
+                    ax.set_title(f"Proportions (%): {col}", fontsize=11, fontweight='bold')
+                    ax.set_ylabel("Percentage (%)")
+                    plt.xticks(rotation=45, ha='right')
+                    plt.tight_layout()
+                    plt.show()
 
-    print("A2. The raw readout - more numbers than we need. That is normal.")
-    display(vrs.groupby("branch")["sales"].describe().round(2))
+            if cat_dropdown:
+                cat_dropdown.observe(render_categorical_tab, names='value')
 
-    print("A3. The friendly summary - the same numbers, in board language:")
-    friendly = vrs.groupby("branch")["sales"].agg(
-        average_week="mean", middle_week="median",
-        most_common_week=lambda s: s.mode()[0],
-        wobble="std", best_week="max", weakest_week="min").round(2)
-    display(friendly)
+            # --- TAB 3: GROUPED BREAKDOWN & CROSSTABS ---
+            out_tab3 = widgets.Output()
+            group_cat = widgets.Dropdown(options=cat_cols, description='Group (Cat):') if cat_cols else None
+            group_target = widgets.Dropdown(options=num_cols + cat_cols, description='Target Var:')
+            
+            def render_grouped_tab(change=None):
+                with out_tab3:
+                    clear_output()
+                    if not cat_cols:
+                        print("Grouping requires at least one categorical column.")
+                        return
+                    
+                    cat_var = group_cat.value
+                    target_var = group_target.value
+                    
+                    if target_var in num_cols:
+                        print(f"--- Grouped Metric Summary: {target_var} by {cat_var} ---")
+                        res = df.groupby(cat_var)[target_var].agg(
+                            Count='count', Mean='mean', Median='median', Std_Dev='std'
+                        ).round(2)
+                        display(res)
+                    else:
+                        print(f"--- Row % Crosstab: {cat_var} vs {target_var} ---")
+                        ct = pd.crosstab(df[cat_var], df[target_var], normalize='index') * 100
+                        display(ct.round(1))
 
-    print("A4. Wobble per rupee - the coefficient of variation (a RATIO):")
-    g = vrs.groupby("branch")["sales"].agg(["mean", "std"])
-    g["wobble_per_rupee (CV)"] = (g["std"] / g["mean"]).round(3)
-    display(g.rename(columns={"std": "wobble (SD)"}))
+            if group_cat and group_target:
+                group_cat.observe(render_grouped_tab, names='value')
+                group_target.observe(render_grouped_tab, names='value')
 
-    print("A5. The wedding-season experiment:")
-    b    = vrs[vrs.branch == "Branch B - Karan"]
-    run  = b[(b.week >= 45) & (b.week <= 50)]
-    rest = b.drop(run.index)
-    print("  Karan's mean WITH the wedding run   :", round(b.sales.mean(), 2))
-    print("  Karan's mean WITHOUT the wedding run:", round(rest.sales.mean(), 2))
-    print("  The run's share of his entire year  :", round(100 * run.sales.sum() / b.sales.sum(), 1), "%")
+            # Build App Layout inside Tabs
+            tab_ui = widgets.Tab()
+            
+            # Assemble Tab 1 UI
+            ui_tab1 = widgets.VBox([num_dropdown, out_tab1]) if num_dropdown else widgets.VBox([out_tab1])
+            # Assemble Tab 2 UI
+            ui_tab2 = widgets.VBox([cat_dropdown, out_tab2]) if cat_dropdown else widgets.VBox([out_tab2])
+            # Assemble Tab 3 UI
+            ui_tab3 = widgets.VBox([widgets.HBox([group_cat, group_target]), out_tab3]) if group_cat else widgets.VBox([out_tab3])
+            
+            tab_ui.children = [ui_tab1, ui_tab2, ui_tab3]
+            tab_ui.set_title(0, 'Numeric Analytics')
+            tab_ui.set_title(1, 'Categorical Analytics')
+            tab_ui.set_title(2, 'Grouped & Crosstabs')
+            
+            display(tab_ui)
+            
+            # Initial renders
+            render_numeric_tab()
+            render_categorical_tab()
+            render_grouped_tab()
 
-    # =========================================================== PART B =======
-    hr("PART B - Micro-case 2: Apex Distributors (your group drives)")
-
-    print("B1. The dealer ledger (first 8 of 1,200 rows):")
-    display(apex.head(8))
-
-    print("B2. T1 - DSO by dealer tier: wherever the mean sits above the median,")
-    print("    a minority of slow payers is dragging the average up.")
-    display(apex.groupby("tier")["dso_days"].agg(
-        accounts_months="count", mean_DSO="mean",
-        median_DSO="median", wobble="std").round(1))
-
-    print("B3. T2 - tier x overdue bucket (row % = each tier's own dealer-months):")
-    ct = pd.crosstab(apex["tier"], apex["overdue_bucket"], normalize="index") * 100
-    display(ct.round(1))
-
-    print("B4. T3 - the CFO's paradox: DSO climbing while sales stay flat")
-    dso_trend = apex.pivot_table(index="month", columns="tier",
-                                 values="dso_days", aggfunc="mean").round(1)
-    sales_by_month = apex.groupby("month")["sales_lakh"].sum().round(1)
-    display(dso_trend)
-    print("Total monthly sales (Rs lakh) - watch how FLAT this stays:")
-    display(sales_by_month)
-
-    print("B5. T4 - correlation teaser (observe, do not conclude - Session 5 owns this):")
-    colors = apex["tier"].map({"Tier 1": "#1f77b4", "Tier 2": "#ff7f0e", "Tier 3": "#2ca02c"})
-    ax = apex.plot.scatter(x="discount_pct", y="order_qty", c=colors, alpha=0.35)
-    ax.set_title("Discount % vs Order Quantity - all 1,200 dealer-months")
-    plt.show()
-    print("correlation (discount, order_qty):",
-          round(apex["discount_pct"].corr(apex["order_qty"]), 3))
-    if SHOW_WITHIN_TIER_CORR:
-        t1 = apex[apex.tier == "Tier 1"]
-        print("within Tier 1 only:",
-              round(t1["discount_pct"].corr(t1["order_qty"]), 3))
-
-    hr("Done. Now answer T5: the CFO's one-pager, in exactly two numbers.")
+    upload_widget.observe(on_file_upload, names='value')
