@@ -1,10 +1,18 @@
 # ============================================================================
-# Session 01 - Descriptive Statistics App (Generic CSV Upload Engine)
+# Session 01 - Descriptive Statistics App (Generic CSV Upload Engine, v2)
 # Repo : github.com/sudhir-voleti/colabApps
 # Launch code in Colab:
 #   import requests
 #   exec(requests.get("https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/desc_stats_app.py").text)
 #   launch_app()
+#
+# v2 changes (Session-1 alignment):
+#   - time-aware line chart with mean/median overlay (the "who is pulling" picture)
+#   - exclude-weeks control (the wedding-season experiment, live)
+#   - scatter tab with correlation r; NO color-by / subgroup (Session-5 confound guard)
+#   - group-trend view (mean by group over time - the CFO's paradox)
+#   - bugfix: recast columns no longer dual-listed; id/time columns never metrics
+#   - sample-data fallback button (fetches VRS from the repo if LMS upload fails)
 # ============================================================================
 
 import io
@@ -14,193 +22,289 @@ import matplotlib.pyplot as plt
 import ipywidgets as widgets
 from IPython.display import display, clear_output
 
+SAMPLE_URL = ("https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/"
+              "vrs_retail_weekly.csv")
+TIME_NAMES = {"week", "month", "date", "day", "period", "yr", "year", "quarter"}
+ID_PATTERNS = ("id", "code", "number", "no_", "_no", "num")
+
+
+def _is_time_or_id(col):
+    c = col.strip().lower()
+    if c in TIME_NAMES:
+        return True
+    return any(p in c for p in ID_PATTERNS) and not any(
+        k in c for k in ("sales", "limit", "qty", "count", "days", "dso"))
+
+
 def launch_app():
-    # 1. UI Components Setup
     upload_widget = widgets.FileUpload(
-        accept='.csv',
-        multiple=False,
-        description='Upload CSV',
-        button_style='primary',
-        icon='upload'
-    )
-    
+        accept=".csv", multiple=False, description="Upload CSV",
+        button_style="primary", icon="upload")
+    sample_btn = widgets.Button(description="Load sample data (VRS)",
+                                button_style="info", icon="table")
     out_main = widgets.Output()
-    
+
     print("=" * 64)
     print("  Session 01: Interactive Descriptive Statistics Engine")
     print("=" * 64)
-    print("Please upload your CSV file to begin analysis:\n")
-    display(upload_widget)
+    print("Upload your CSV (from the LMS) or load the sample dataset.\n")
+    display(widgets.HBox([upload_widget, sample_btn]))
     display(out_main)
-    
-    # 2. Main Callback on File Upload
-    def on_file_upload(change):
+
+    # ------------------------------------------------------------ engine
+    def run_analysis(df, label):
         with out_main:
             clear_output()
-            if not upload_widget.value:
-                return
-            
-            # Extract raw uploaded file bytes
-            uploaded_file = list(upload_widget.value.values())[0] if isinstance(upload_widget.value, dict) else upload_widget.value[0]
-            content = uploaded_file['content'] if isinstance(uploaded_file, dict) else uploaded_file.content
-            
-            try:
-                df = pd.read_csv(io.BytesIO(content))
-            except Exception as e:
-                print(f"❌ Error reading CSV file: {e}")
-                return
-            
-            print(f"✅ File successfully loaded! Data Shape: {df.shape[0]} rows × {df.shape[1]} columns.\n")
-            
-            # --- Auto-Detection of Variable Types ---
+            print(f"Loaded: {label}  |  {df.shape[0]} rows x {df.shape[1]} columns\n")
+
             num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            cat_cols = df.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
-            
-            # Heuristic: Move low-cardinality numerics (<=10 unique values, e.g. Month, Tier ID) to categoricals if helpful
-            for col in num_cols[:]:
-                if df[col].nunique() <= 5 and col not in cat_cols:
-                    cat_cols.append(col)
+            cat_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
 
-            if not num_cols and not cat_cols:
-                print("❌ No readable numeric or categorical columns found.")
+            # recast low-cardinality numerics to categorical (and REMOVE from metrics)
+            for col in num_cols[:]:
+                if df[col].nunique() <= 5:
+                    num_cols.remove(col)
+                    if col not in cat_cols:
+                        cat_cols.append(col)
+
+            # time column + metric hygiene
+            time_col = next((c for c in num_cols if c.strip().lower() in TIME_NAMES), None)
+            metric_cols = [c for c in num_cols if not _is_time_or_id(c)]
+            if time_col and time_col in metric_cols:
+                metric_cols.remove(time_col)
+
+            if not metric_cols and not cat_cols:
+                print("No analyzable columns found. Check the file.")
                 return
 
-            # --- TAB 1: NUMERIC ANALYTICS ---
-            out_tab1 = widgets.Output()
-            num_dropdown = widgets.Dropdown(options=num_cols, description='Metric:') if num_cols else None
-            
-            def render_numeric_tab(change=None):
-                with out_tab1:
+            excl = {"from": None, "to": None}   # the wedding-experiment window
+
+            def filtered(sub):
+                if time_col and excl["from"] is not None and excl["from"] <= excl["to"]:
+                    return sub[~sub[time_col].between(excl["from"], excl["to"])]
+                return sub
+
+            # ---------------- TAB 1: NUMERIC ----------------
+            out1 = widgets.Output()
+            dd_metric = widgets.Dropdown(options=metric_cols or ["(none)"],
+                                         description="Metric:")
+
+            def render_tab1(change=None):
+                with out1:
                     clear_output()
-                    if not num_cols:
-                        print("No numeric columns detected in this dataset.")
+                    if not metric_cols:
+                        print("No metric columns.")
                         return
-                    
-                    col = num_dropdown.value
-                    s = df[col].dropna()
-                    
-                    mean_val = s.mean()
-                    med_val = s.median()
-                    std_val = s.std()
-                    cv_val = std_val / mean_val if mean_val != 0 else np.nan
-                    mode_val = s.mode()[0] if not s.mode().empty else np.nan
-                    
-                    summary_df = pd.DataFrame({
+                    col = dd_metric.value
+                    s = filtered(df)[col].dropna()
+                    if len(s) == 0:
+                        print("Nothing left after exclusion - widen the window.")
+                        return
+                    mean_v, med_v, sd_v = s.mean(), s.median(), s.std()
+                    cv_v = sd_v / mean_v if mean_v else np.nan
+                    mode_v = s.mode()[0] if not s.mode().empty else np.nan
+                    summary = pd.DataFrame({
                         "Metric": [col],
-                        "Mean": [round(mean_val, 2)],
-                        "Median": [round(med_val, 2)],
-                        "Mode": [round(mode_val, 2)],
-                        "Std Dev (Wobble)": [round(std_val, 2)],
-                        "CV (Wobble/Rupee)": [round(cv_val, 3)],
-                        "Min": [round(s.min(), 2)],
-                        "Max": [round(s.max(), 2)],
-                        "Count": [int(s.count())]
-                    })
-                    
-                    print(f"--- Executive Numeric Summary: {col} ---")
-                    display(summary_df)
-                    
-                    # Distribution Plot
-                    fig, ax = plt.subplots(figsize=(7, 3.5))
-                    s.plot(kind='hist', bins=20, alpha=0.5, color='#003366', density=True, ax=ax)
-                    s.plot(kind='kde', color='#D97706', linewidth=2, ax=ax)
-                    ax.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f'Mean ({mean_val:.2f})')
-                    ax.axvline(med_val, color='green', linestyle=':', linewidth=2, label=f'Median ({med_val:.2f})')
-                    ax.set_title(f"Distribution & Skewness Check: {col}", fontsize=11, fontweight='bold')
-                    ax.legend()
-                    plt.tight_layout()
-                    plt.show()
+                        "Mean (average)": [round(mean_v, 2)],
+                        "Median (typical)": [round(med_v, 2)],
+                        "Mode (most common)": [round(mode_v, 2)],
+                        "SD (wobble)": [round(sd_v, 2)],
+                        "CV (wobble per rupee)": [round(cv_v, 3)],
+                        "Min": [round(s.min(), 2)], "Max": [round(s.max(), 2)],
+                        "Count": [int(s.count())]})
+                    if time_col and excl["from"] is not None and excl["from"] <= excl["to"]:
+                        print(f"EXCLUDING {time_col} {excl['from']}-{excl['to']} "
+                              f"({int(s.count())} rows remain)")
+                    display(summary)
 
-            if num_dropdown:
-                num_dropdown.observe(render_numeric_tab, names='value')
-
-            # --- TAB 2: CATEGORICAL ANALYTICS ---
-            out_tab2 = widgets.Output()
-            cat_dropdown = widgets.Dropdown(options=cat_cols, description='Category:') if cat_cols else None
-            
-            def render_categorical_tab(change=None):
-                with out_tab2:
-                    clear_output()
-                    if not cat_cols:
-                        print("No categorical columns detected in this dataset.")
-                        return
-                    
-                    col = cat_dropdown.value
-                    s = df[col].astype(str)
-                    
-                    counts = s.value_counts()
-                    props = (s.value_counts(normalize=True) * 100).round(1)
-                    
-                    cat_summary = pd.DataFrame({
-                        "Count": counts,
-                        "Proportion (%)": props
-                    })
-                    
-                    print(f"--- Categorical Breakdown: {col} ---")
-                    display(cat_summary)
-                    
-                    # Category Bar Chart
-                    fig, ax = plt.subplots(figsize=(7, 3.5))
-                    props.plot(kind='bar', color='#003366', ax=ax)
-                    ax.set_title(f"Proportions (%): {col}", fontsize=11, fontweight='bold')
-                    ax.set_ylabel("Percentage (%)")
-                    plt.xticks(rotation=45, ha='right')
-                    plt.tight_layout()
-                    plt.show()
-
-            if cat_dropdown:
-                cat_dropdown.observe(render_categorical_tab, names='value')
-
-            # --- TAB 3: GROUPED BREAKDOWN & CROSSTABS ---
-            out_tab3 = widgets.Output()
-            group_cat = widgets.Dropdown(options=cat_cols, description='Group (Cat):') if cat_cols else None
-            group_target = widgets.Dropdown(options=num_cols + cat_cols, description='Target Var:')
-            
-            def render_grouped_tab(change=None):
-                with out_tab3:
-                    clear_output()
-                    if not cat_cols:
-                        print("Grouping requires at least one categorical column.")
-                        return
-                    
-                    cat_var = group_cat.value
-                    target_var = group_target.value
-                    
-                    if target_var in num_cols:
-                        print(f"--- Grouped Metric Summary: {target_var} by {cat_var} ---")
-                        res = df.groupby(cat_var)[target_var].agg(
-                            Count='count', Mean='mean', Median='median', Std_Dev='std'
-                        ).round(2)
-                        display(res)
+                    fig, ax = plt.subplots(figsize=(7.5, 3.6))
+                    if time_col is not None:
+                        t = filtered(df)[[time_col, col]].dropna().sort_values(time_col)
+                        ax.plot(t[time_col], t[col], color="#64748B", lw=1.2,
+                                marker="o", ms=2.5)
+                        ax.axhline(mean_v, color="#DC2626", ls="--", lw=1.8,
+                                   label=f"mean = {mean_v:.2f}")
+                        ax.axhline(med_v, color="#059669", ls=":", lw=1.8,
+                                   label=f"median = {med_v:.2f}")
+                        ax.set_xlabel(time_col)
+                        ax.set_title(f"{col} over {time_col} - watch the gap "
+                                     f"between mean and median", fontweight="bold")
+                        ax.legend()
                     else:
-                        print(f"--- Row % Crosstab: {cat_var} vs {target_var} ---")
-                        ct = pd.crosstab(df[cat_var], df[target_var], normalize='index') * 100
+                        s.plot(kind="hist", bins=20, alpha=0.55, color="#003366", ax=ax)
+                        ax.axvline(mean_v, color="#DC2626", ls="--", lw=1.8,
+                                   label=f"mean = {mean_v:.2f}")
+                        ax.axvline(med_v, color="#059669", ls=":", lw=1.8,
+                                   label=f"median = {med_v:.2f}")
+                        ax.set_title(f"Distribution of {col}", fontweight="bold")
+                        ax.legend()
+                    plt.tight_layout()
+                    plt.show()
+
+            # ---------------- TAB 2: CATEGORICAL ----------------
+            out2 = widgets.Output()
+            dd_cat = widgets.Dropdown(options=cat_cols or ["(none)"],
+                                      description="Category:")
+
+            def render_tab2(change=None):
+                with out2:
+                    clear_output()
+                    if not cat_cols:
+                        print("No categorical columns.")
+                        return
+                    col = dd_cat.value
+                    s = df[col].astype(str)
+                    tab = pd.DataFrame({
+                        "Count": s.value_counts(),
+                        "Proportion (%)": (s.value_counts(normalize=True) * 100).round(1)})
+                    print(f"Categorical breakdown: {col}  (labels are counted, not averaged)")
+                    display(tab)
+                    fig, ax = plt.subplots(figsize=(7, 3.4))
+                    tab["Proportion (%)"].plot(kind="bar", color="#003366", ax=ax)
+                    ax.set_ylabel("% of rows")
+                    ax.set_title(f"Proportions: {col}", fontweight="bold")
+                    plt.xticks(rotation=45, ha="right")
+                    plt.tight_layout()
+                    plt.show()
+
+            # ---------------- TAB 3: GROUPED / CROSSTAB / TREND ----------------
+            out3 = widgets.Output()
+            dd_group = widgets.Dropdown(options=cat_cols or ["(none)"],
+                                        description="Group:")
+            dd_target = widgets.Dropdown(options=(metric_cols + cat_cols) or ["(none)"],
+                                         description="Target:")
+
+            def render_tab3(change=None):
+                with out3:
+                    clear_output()
+                    if not cat_cols:
+                        print("Grouping needs a categorical column.")
+                        return
+                    gvar, tvar = dd_group.value, dd_target.value
+                    if tvar in metric_cols:
+                        print(f"{tvar} summarized within each {gvar} "
+                              f"(mean vs median gap = skew signal):")
+                        res = filtered(df).groupby(gvar)[tvar].agg(
+                            Count="count", Mean="mean", Median="median",
+                            SD="std").round(2)
+                        display(res)
+                        # group trend over time (the CFO's paradox view)
+                        if time_col is not None:
+                            tr = (filtered(df)
+                                  .groupby([time_col, gvar])[tvar].mean().unstack())
+                            if tr.shape[0] > 2:
+                                fig, ax = plt.subplots(figsize=(7.5, 3.4))
+                                tr.plot(ax=ax, marker="o", ms=3)
+                                ax.set_title(f"Mean {tvar} over {time_col}, by {gvar} "
+                                             f"- is anything drifting?", fontweight="bold")
+                                ax.set_ylabel(f"mean {tvar}")
+                                plt.tight_layout()
+                                plt.show()
+                    else:
+                        print(f"Row-% crosstab: {gvar} vs {tvar} "
+                              f"(shares, never averages, for labels):")
+                        ct = pd.crosstab(df[gvar], df[tvar], normalize="index") * 100
                         display(ct.round(1))
 
-            if group_cat and group_target:
-                group_cat.observe(render_grouped_tab, names='value')
-                group_target.observe(render_grouped_tab, names='value')
+            # ---------------- TAB 4: CO-MOVEMENT (guarded) ----------------
+            out4 = widgets.Output()
+            dd_x = widgets.Dropdown(options=metric_cols or ["(none)"], description="X:")
+            dd_y = widgets.Dropdown(options=(metric_cols[1:] + metric_cols[:1]) or ["(none)"],
+                                    description="Y:")
 
-            # Build App Layout inside Tabs
+            def render_tab4(change=None):
+                with out4:
+                    clear_output()
+                    if len(metric_cols) < 2:
+                        print("Need two metric columns for a scatter.")
+                        return
+                    x, y = dd_x.value, dd_y.value
+                    sub = filtered(df)[[x, y]].dropna()
+                    r = sub[x].corr(sub[y])
+                    fig, ax = plt.subplots(figsize=(6.5, 4.2))
+                    ax.scatter(sub[x], sub[y], alpha=0.35, color="#003366", s=18)
+                    ax.set_xlabel(x); ax.set_ylabel(y)
+                    ax.set_title(f"{y} vs {x}   |   r = {r:.3f}\n"
+                                 f"(observe only - Session 5 names this number)",
+                                 fontweight="bold")
+                    plt.tight_layout()
+                    plt.show()
+                    print(f"correlation r = {r:.3f}")
+                    print("Does X drive Y - or does something else drive both? "
+                          "Hold that thought for Session 5.")
+
+            # ---------------- wedding-experiment controls ----------------
+            excl_ui = None
+            if time_col is not None:
+                tmin, tmax = int(df[time_col].min()), int(df[time_col].max())
+                sl_from = widgets.IntSlider(value=tmax + 1, min=tmin, max=tmax + 1,
+                                            description="Exclude from:", continuous_update=False)
+                sl_to = widgets.IntSlider(value=tmax, min=tmin - 1, max=tmax,
+                                          description="to:", continuous_update=False)
+
+                def on_excl(change):
+                    excl["from"], excl["to"] = sl_from.value, sl_to.value
+                    render_tab1(); render_tab3()
+
+                sl_from.observe(on_excl, names="value")
+                sl_to.observe(on_excl, names="value")
+                excl_ui = widgets.VBox([
+                    widgets.HTML("<b>Experiment:</b> exclude a window of "
+                                 f"{time_col}s and watch the summary change "
+                                 "(try excluding the big-event weeks)."),
+                    widgets.HBox([sl_from, sl_to])])
+
+            # ---------------- assemble tabs ----------------
             tab_ui = widgets.Tab()
-            
-            # Assemble Tab 1 UI
-            ui_tab1 = widgets.VBox([num_dropdown, out_tab1]) if num_dropdown else widgets.VBox([out_tab1])
-            # Assemble Tab 2 UI
-            ui_tab2 = widgets.VBox([cat_dropdown, out_tab2]) if cat_dropdown else widgets.VBox([out_tab2])
-            # Assemble Tab 3 UI
-            ui_tab3 = widgets.VBox([widgets.HBox([group_cat, group_target]), out_tab3]) if group_cat else widgets.VBox([out_tab3])
-            
-            tab_ui.children = [ui_tab1, ui_tab2, ui_tab3]
-            tab_ui.set_title(0, 'Numeric Analytics')
-            tab_ui.set_title(1, 'Categorical Analytics')
-            tab_ui.set_title(2, 'Grouped & Crosstabs')
-            
+            t1 = [dd_metric] + ([excl_ui] if excl_ui else []) + [out1]
+            tab_ui.children = [
+                widgets.VBox(t1), widgets.VBox([dd_cat, out2]),
+                widgets.VBox([widgets.HBox([dd_group, dd_target]), out3]),
+                widgets.VBox([widgets.HBox([dd_x, dd_y]), out4])]
+            tab_ui.set_title(0, "Numeric Analytics")
+            tab_ui.set_title(1, "Categorical Analytics")
+            tab_ui.set_title(2, "Grouped, Crosstabs & Trends")
+            tab_ui.set_title(3, "Co-movement (observe only)")
             display(tab_ui)
-            
-            # Initial renders
-            render_numeric_tab()
-            render_categorical_tab()
-            render_grouped_tab()
 
-    upload_widget.observe(on_file_upload, names='value')
+            dd_metric.observe(render_tab1, names="value")
+            dd_cat.observe(render_tab2, names="value")
+            dd_group.observe(render_tab3, names="value")
+            dd_target.observe(render_tab3, names="value")
+            dd_x.observe(render_tab4, names="value")
+            dd_y.observe(render_tab4, names="value")
+            render_tab1(); render_tab2(); render_tab3(); render_tab4()
+
+    # ------------------------------------------------------------ upload
+    def on_upload(change):
+        if not upload_widget.value:
+            return
+        f = (list(upload_widget.value.values())[0]
+             if isinstance(upload_widget.value, dict) else upload_widget.value[0])
+        content = f["content"] if isinstance(f, dict) else f.content
+        try:
+            df = pd.read_csv(io.BytesIO(content))
+        except Exception as e:
+            with out_main:
+                clear_output()
+                print(f"Error reading CSV: {e}")
+            return
+        name = (f.get("name", "uploaded.csv") if isinstance(f, dict)
+                else getattr(f, "name", "uploaded.csv"))
+        run_analysis(df, name)
+
+    def on_sample(btn):
+        with out_main:
+            clear_output()
+            print("Fetching sample dataset from GitHub...")
+        try:
+            import requests
+            df = pd.read_csv(io.BytesIO(requests.get(SAMPLE_URL).content))
+        except Exception as e:
+            with out_main:
+                print(f"Sample load failed ({e}). Please upload your CSV instead.")
+            return
+        run_analysis(df, "vrs_retail_weekly.csv (sample)")
+
+    upload_widget.observe(on_upload, names="value")
+    sample_btn.on_click(on_sample)
