@@ -1,18 +1,17 @@
 # ============================================================================
-# Session 01 - Descriptive Statistics App (Generic CSV Upload Engine, v2)
+# Session 01 - Descriptive Statistics App (Generic CSV Upload Engine, v3)
 # Repo : github.com/sudhir-voleti/colabApps
 # Launch code in Colab:
 #   import requests
 #   exec(requests.get("https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/desc_stats_app.py").text)
 #   launch_app()
 #
-# v2 changes (Session-1 alignment):
-#   - time-aware line chart with mean/median overlay (the "who is pulling" picture)
-#   - exclude-weeks control (the wedding-season experiment, live)
-#   - scatter tab with correlation r; NO color-by / subgroup (Session-5 confound guard)
-#   - group-trend view (mean by group over time - the CFO's paradox)
-#   - bugfix: recast columns no longer dual-listed; id/time columns never metrics
-#   - sample-data fallback button (fetches VRS from the repo if LMS upload fails)
+# v3 Architecture:
+#   - TAB 1: ALWAYS Data Preview (top 10 rows + column diagnostic metadata)
+#   - TAB 2: Numeric Analytics (Mean/Median overlay + Wedding-season exclusion slider)
+#   - TAB 3: Categorical Analytics (Proportions % + Bar charts)
+#   - TAB 4: Grouped Breakdown & Trends (Grouped Mean/Median + CFO Trend line)
+#   - TAB 5: Co-movement Scatter (Guarded Pearson r - Session 5 confound guard)
 # ============================================================================
 
 import io
@@ -55,7 +54,7 @@ def launch_app():
     def run_analysis(df, label):
         with out_main:
             clear_output()
-            print(f"Loaded: {label}  |  {df.shape[0]} rows x {df.shape[1]} columns\n")
+            print(f"✅ Loaded: {label}  |  {df.shape[0]} rows × {df.shape[1]} columns\n")
 
             num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
             cat_cols = df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
@@ -74,31 +73,53 @@ def launch_app():
                 metric_cols.remove(time_col)
 
             if not metric_cols and not cat_cols:
-                print("No analyzable columns found. Check the file.")
+                print("❌ No analyzable columns found. Check the file.")
                 return
 
-            excl = {"from": None, "to": None}   # the wedding-experiment window
+            excl = {"from": None, "to": None}   # wedding-experiment window
 
             def filtered(sub):
                 if time_col and excl["from"] is not None and excl["from"] <= excl["to"]:
                     return sub[~sub[time_col].between(excl["from"], excl["to"])]
                 return sub
 
-            # ---------------- TAB 1: NUMERIC ----------------
+            # ---------------- TAB 1: DATA PREVIEW (ALWAYS FIRST) ----------------
+            out0 = widgets.Output()
+            with out0:
+                print(f"--- Data Preview: First 10 Rows ---")
+                display(df.head(10))
+                
+                print("\n--- Dataset Diagnostics & Schema ---")
+                diag_df = pd.DataFrame({
+                    "Column Name": df.columns,
+                    "Data Type": [str(df[c].dtype) for c in df.columns],
+                    "Non-Null Count": [f"{df[c].count()} / {len(df)}" for c in df.columns],
+                    "Missing Values": [df[c].isnull().sum() for c in df.columns],
+                    "Unique Values": [df[c].nunique() for c in df.columns],
+                    "Auto Classification": [
+                        "Time Column" if c == time_col else
+                        "Metric" if c in metric_cols else
+                        "Categorical" if c in cat_cols else "ID / Label"
+                        for c in df.columns
+                    ]
+                })
+                display(diag_df)
+
+            # ---------------- TAB 2: NUMERIC ANALYTICS ----------------
             out1 = widgets.Output()
             dd_metric = widgets.Dropdown(options=metric_cols or ["(none)"],
                                          description="Metric:")
 
-            def render_tab1(change=None):
+            def render_tab2(change=None):
                 with out1:
                     clear_output()
                     if not metric_cols:
-                        print("No metric columns.")
+                        print("No metric columns detected.")
                         return
                     col = dd_metric.value
                     s = filtered(df)[col].dropna()
                     if len(s) == 0:
-                        print("Nothing left after exclusion - widen the window.")
+                        print("Nothing left after exclusion window - widen slider.")
                         return
                     mean_v, med_v, sd_v = s.mean(), s.median(), s.std()
                     cv_v = sd_v / mean_v if mean_v else np.nan
@@ -141,16 +162,16 @@ def launch_app():
                     plt.tight_layout()
                     plt.show()
 
-            # ---------------- TAB 2: CATEGORICAL ----------------
+            # ---------------- TAB 3: CATEGORICAL ANALYTICS ----------------
             out2 = widgets.Output()
             dd_cat = widgets.Dropdown(options=cat_cols or ["(none)"],
                                       description="Category:")
 
-            def render_tab2(change=None):
+            def render_tab3(change=None):
                 with out2:
                     clear_output()
                     if not cat_cols:
-                        print("No categorical columns.")
+                        print("No categorical columns detected.")
                         return
                     col = dd_cat.value
                     s = df[col].astype(str)
@@ -167,14 +188,14 @@ def launch_app():
                     plt.tight_layout()
                     plt.show()
 
-            # ---------------- TAB 3: GROUPED / CROSSTAB / TREND ----------------
+            # ---------------- TAB 4: GROUPED / CROSSTAB / TREND ----------------
             out3 = widgets.Output()
             dd_group = widgets.Dropdown(options=cat_cols or ["(none)"],
                                         description="Group:")
             dd_target = widgets.Dropdown(options=(metric_cols + cat_cols) or ["(none)"],
                                          description="Target:")
 
-            def render_tab3(change=None):
+            def render_tab4(change=None):
                 with out3:
                     clear_output()
                     if not cat_cols:
@@ -206,17 +227,17 @@ def launch_app():
                         ct = pd.crosstab(df[gvar], df[tvar], normalize="index") * 100
                         display(ct.round(1))
 
-            # ---------------- TAB 4: CO-MOVEMENT (guarded) ----------------
+            # ---------------- TAB 5: CO-MOVEMENT (Guarded) ----------------
             out4 = widgets.Output()
             dd_x = widgets.Dropdown(options=metric_cols or ["(none)"], description="X:")
             dd_y = widgets.Dropdown(options=(metric_cols[1:] + metric_cols[:1]) or ["(none)"],
                                     description="Y:")
 
-            def render_tab4(change=None):
+            def render_tab5(change=None):
                 with out4:
                     clear_output()
                     if len(metric_cols) < 2:
-                        print("Need two metric columns for a scatter.")
+                        print("Need two metric columns for a scatter plot.")
                         return
                     x, y = dd_x.value, dd_y.value
                     sub = filtered(df)[[x, y]].dropna()
@@ -233,7 +254,7 @@ def launch_app():
                     print("Does X drive Y - or does something else drive both? "
                           "Hold that thought for Session 5.")
 
-            # ---------------- wedding-experiment controls ----------------
+            # ---------------- Wedding-experiment controls ----------------
             excl_ui = None
             if time_col is not None:
                 tmin, tmax = int(df[time_col].min()), int(df[time_col].max())
@@ -244,7 +265,7 @@ def launch_app():
 
                 def on_excl(change):
                     excl["from"], excl["to"] = sl_from.value, sl_to.value
-                    render_tab1(); render_tab3()
+                    render_tab2(); render_tab4()
 
                 sl_from.observe(on_excl, names="value")
                 sl_to.observe(on_excl, names="value")
@@ -254,26 +275,34 @@ def launch_app():
                                  "(try excluding the big-event weeks)."),
                     widgets.HBox([sl_from, sl_to])])
 
-            # ---------------- assemble tabs ----------------
+            # ---------------- Assemble Tabs ----------------
             tab_ui = widgets.Tab()
-            t1 = [dd_metric] + ([excl_ui] if excl_ui else []) + [out1]
+            t2 = [dd_metric] + ([excl_ui] if excl_ui else []) + [out1]
+            
             tab_ui.children = [
-                widgets.VBox(t1), widgets.VBox([dd_cat, out2]),
-                widgets.VBox([widgets.HBox([dd_group, dd_target]), out3]),
-                widgets.VBox([widgets.HBox([dd_x, dd_y]), out4])]
-            tab_ui.set_title(0, "Numeric Analytics")
-            tab_ui.set_title(1, "Categorical Analytics")
-            tab_ui.set_title(2, "Grouped, Crosstabs & Trends")
-            tab_ui.set_title(3, "Co-movement (observe only)")
+                widgets.VBox([out0]),  # TAB 1: DATA PREVIEW (ALWAYS FIRST)
+                widgets.VBox(t2),      # TAB 2: NUMERIC
+                widgets.VBox([dd_cat, out2]), # TAB 3: CATEGORICAL
+                widgets.VBox([widgets.HBox([dd_group, dd_target]), out3]), # TAB 4: GROUPED/TREND
+                widgets.VBox([widgets.HBox([dd_x, dd_y]), out4])            # TAB 5: CO-MOVEMENT
+            ]
+            
+            tab_ui.set_title(0, "📋 Data Preview")
+            tab_ui.set_title(1, "📊 Numeric Analytics")
+            tab_ui.set_title(2, "🏷️ Categorical Analytics")
+            tab_ui.set_title(3, "📈 Grouped Breakdown & Trends")
+            tab_ui.set_title(4, "🔗 Co-movement (Observe)")
+            
             display(tab_ui)
 
-            dd_metric.observe(render_tab1, names="value")
-            dd_cat.observe(render_tab2, names="value")
-            dd_group.observe(render_tab3, names="value")
-            dd_target.observe(render_tab3, names="value")
-            dd_x.observe(render_tab4, names="value")
-            dd_y.observe(render_tab4, names="value")
-            render_tab1(); render_tab2(); render_tab3(); render_tab4()
+            dd_metric.observe(render_tab2, names="value")
+            dd_cat.observe(render_tab3, names="value")
+            dd_group.observe(render_tab4, names="value")
+            dd_target.observe(render_tab4, names="value")
+            dd_x.observe(render_tab5, names="value")
+            dd_y.observe(render_tab5, names="value")
+            
+            render_tab2(); render_tab3(); render_tab4(); render_tab5()
 
     # ------------------------------------------------------------ upload
     def on_upload(change):
@@ -287,7 +316,7 @@ def launch_app():
         except Exception as e:
             with out_main:
                 clear_output()
-                print(f"Error reading CSV: {e}")
+                print(f"❌ Error reading CSV: {e}")
             return
         name = (f.get("name", "uploaded.csv") if isinstance(f, dict)
                 else getattr(f, "name", "uploaded.csv"))
@@ -302,7 +331,7 @@ def launch_app():
             df = pd.read_csv(io.BytesIO(requests.get(SAMPLE_URL).content))
         except Exception as e:
             with out_main:
-                print(f"Sample load failed ({e}). Please upload your CSV instead.")
+                print(f"❌ Sample load failed ({e}). Please upload your CSV instead.")
             return
         run_analysis(df, "vrs_retail_weekly.csv (sample)")
 
