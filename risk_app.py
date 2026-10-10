@@ -1,5 +1,5 @@
 # ============================================================================
-# Session 02 - Interactive Risk & Financial Impact Engine (v3.3 Final)
+# Session 02 - Interactive Risk & Financial Impact Engine (v3.4 Final)
 # Repo : github.com/sudhir-voleti/colabApps
 # Launch in Colab:
 #   import requests
@@ -38,13 +38,11 @@ def launch_app():
     print("=" * 68)
     print("  The Risk Slide Rule: Probability, Tail Risk & Financial Impact")
     print("=" * 68)
-    print("Tab 1 finds the probability. Tab 2 prices it. Press UPDATE to run.\n")
 
     # ---------------- TAB 1 WIDGETS ----------------
     dd_kind = widgets.Dropdown(
         options=["Normal (thin, symmetric)",
-                 "Log-normal (right-skewed: type mean + median)",
-                 "Left-skewed (low crashes: type mean + median or mean + wobble)",
+                 "Log-normal (skewed: type mean + median)",
                  "Student-t (fat-tailed: type mean + wobble)"],
         description="Shape:", style={"description_width": "initial"},
         layout=widgets.Layout(width="480px"))
@@ -75,9 +73,6 @@ def launch_app():
         if kind.startswith("Log-normal"):
             ft_sd.layout.display = "none"
             ft_med.layout.display = "flex"
-        elif kind.startswith("Left-skewed"):
-            ft_sd.layout.display = "flex"
-            ft_med.layout.display = "flex"
         else:
             ft_sd.layout.display = "flex"
             ft_med.layout.display = "none"
@@ -94,37 +89,39 @@ def launch_app():
             above = dd_dir.value.startswith("risk of EXCEEDING")
             word = "exceeds" if above else "falls below"
             note = ""
+            is_left_skew = False
 
-            # 1. LOG-NORMAL (RIGHT SKEW)
+            # 1. LOG-NORMAL (AUTOMATIC LEFT OR RIGHT SKEW FROM MEAN VS MEDIAN)
             if dd_kind.value.startswith("Log-normal"):
                 med = _val(ft_med)
-                if med is None or med <= 0 or mean <= med:
-                    print("Log-normal requires Mean > Median (and both > 0).")
-                    print(f"Your input: Mean={mean}, Median={med}. If Mean < Median, pick 'Left-skewed'.")
+                if med is None or med <= 0 or mean <= 0 or mean == med:
+                    print("Log-normal requires both Mean and Median to be positive non-equal numbers.")
                     return
-                s_log = np.sqrt(2.0 * np.log(mean / med))
-                s_log = min(s_log, 2.5)  # Cap for numerical plotting stability
-                dist = stats.lognorm(s=s_log, scale=med)
-                note = f"Right-skewed Log-normal: Solved from Mean ({mean}) & Median ({med})."
-
-            # 2. LEFT-SKEWED (SKEW-NORMAL)
-            elif dd_kind.value.startswith("Left-skewed"):
-                med = _val(ft_med)
-                sd = _val(ft_sd) or 10.0
-                if med is not None and med > mean:
-                    alpha = -6.0
-                    delta = alpha / np.sqrt(1 + alpha**2)
-                    scale_sn = (med - mean) / (np.sqrt(2/np.pi) * (1 - delta))
-                    scale_sn = max(scale_sn, 0.1)
-                    loc_sn = mean - scale_sn * delta * np.sqrt(2/np.pi)
-                    dist = stats.skewnorm(a=alpha, loc=loc_sn, scale=scale_sn)
-                    note = f"Left-skewed: Solved from Mean ({mean}) & Median ({med})."
+                
+                if mean > med:
+                    # Standard Right Skew
+                    s_log = np.sqrt(2.0 * np.log(mean / med))
+                    s_log = min(s_log, 2.5)
+                    dist = stats.lognorm(s=s_log, scale=med)
+                    note = f"Right-skewed Log-normal (Mean > Median): solved from Mean ({mean}) & Median ({med})."
                 else:
-                    alpha = -5.0
-                    dist = stats.skewnorm(a=alpha, loc=mean, scale=sd)
-                    note = f"Left-skewed: Skew-Normal with Mean={mean}, Wobble={sd}."
+                    # Left Skew via inverted Log-normal
+                    is_left_skew = True
+                    gap = med - mean
+                    upper_bound = med + 3.0 * gap
+                    
+                    mean_trans = upper_bound - mean
+                    med_trans = upper_bound - med
+                    
+                    s_log = np.sqrt(2.0 * np.log(mean_trans / med_trans))
+                    s_log = min(s_log, 2.5)
+                    
+                    # Inverted distribution mapping
+                    base_dist = stats.lognorm(s=s_log, scale=med_trans)
+                    dist = base_dist
+                    note = f"Left-skewed Log-normal (Mean < Median): solved from Mean ({mean}) & Median ({med})."
 
-            # 3. STUDENT-T (FAT TAILS)
+            # 2. STUDENT-T (FAT TAILS)
             elif dd_kind.value.startswith("Student-t"):
                 sd = _val(ft_sd)
                 if sd is None or sd <= 0:
@@ -134,7 +131,7 @@ def launch_app():
                 dist = stats.t(df=df, loc=mean, scale=sd * np.sqrt((df - 2.0) / df))
                 note = "Student-t (df=3): Fat-tailed shape with heavy extreme event risks."
 
-            # 4. NORMAL
+            # 3. NORMAL
             else:
                 sd = _val(ft_sd)
                 if sd is None or sd <= 0:
@@ -142,26 +139,49 @@ def launch_app():
                     return
                 dist = stats.norm(loc=mean, scale=sd)
 
-            p_tail = dist.sf(thr) if above else dist.cdf(thr)
+            # Tail risk calculation
+            if is_left_skew:
+                # Map threshold to inverted space
+                thr_trans = upper_bound - thr
+                p_tail = dist.cdf(thr_trans) if above else dist.sf(thr_trans)
+            else:
+                p_tail = dist.sf(thr) if above else dist.cdf(thr)
+
             state["p"] = float(p_tail)
             state["word"] = word
             state["thr"] = thr
 
             # Plotting x-bounds calculation
-            x_lo, x_hi = dist.ppf(0.001), dist.ppf(0.999)
+            if is_left_skew:
+                x_lo_t, x_hi_t = dist.ppf(0.001), dist.ppf(0.999)
+                x_lo, x_hi = upper_bound - x_hi_t, upper_bound - x_lo_t
+            else:
+                x_lo, x_hi = dist.ppf(0.001), dist.ppf(0.999)
+            
             x_lo = min(x_lo, thr - abs(mean - thr))
             x_hi = max(x_hi, thr + abs(mean - thr))
             xs = np.linspace(x_lo, x_hi, 600)
 
             fig, ax = plt.subplots(figsize=(8.5, 3.8))
-            ax.plot(xs, dist.pdf(xs), color="#003366", lw=2.2)
-            mask = xs >= thr if above else xs <= thr
-            ax.fill_between(xs[mask], dist.pdf(xs[mask]), color="#DC2626", alpha=0.45)
+            
+            if is_left_skew:
+                pdf_vals = dist.pdf(upper_bound - xs)
+                mask = xs >= thr if above else xs <= thr
+            else:
+                pdf_vals = dist.pdf(xs)
+                mask = xs >= thr if above else xs <= thr
+
+            ax.plot(xs, pdf_vals, color="#003366", lw=2.2)
+            ax.fill_between(xs[mask], pdf_vals[mask], color="#DC2626", alpha=0.45)
             ax.axvline(thr, color="#DC2626", ls="--", lw=1.8, label=f"Danger line = {thr:.1f}")
             
-            m_val, med_val = dist.mean(), dist.median()
+            if is_left_skew:
+                m_val, med_val = mean, med
+            else:
+                m_val, med_val = dist.mean(), dist.median()
+
             ax.axvline(m_val, color="#059669", ls="-", lw=1.6, label=f"mean = {m_val:.1f}")
-            if abs(med_val - m_val) > 0.02 * (abs(m_val) if m_val != 0 else 1):
+            if abs(med_val - m_val) > 0.01 * (abs(m_val) if m_val != 0 else 1):
                 ax.axvline(med_val, color="#2563EB", ls=":", lw=1.8, label=f"median = {med_val:.1f}")
 
             ax.set_title(f"{dd_kind.value.split(' (')[0]} | {word} {thr:.1f} shaded", fontweight="bold")
@@ -180,10 +200,10 @@ def launch_app():
                 print("Note: " + note)
             print("Carried to Tab 2. Click 'Price it' in Tab 2 when ready.")
 
-        # Clear Tab 2 output when Tab 1 parameters are re-updated
+        # Clear Tab 2 output until user clicks 'Price it'
         with out2:
             out2.clear_output(wait=True)
-            print("Probability updated in Tab 1. Enter cost numbers below and click 'Price it'.")
+            print("Probability updated in Tab 1. Enter cost numbers above and click 'Price it'.")
 
     def render2(btn_=None):
         with out2:
@@ -213,7 +233,7 @@ def launch_app():
     btn2.on_click(render2)
     _toggle_shape()
 
-    # Placeholders on initial load
+    # Initial load output messages (No pre-rendered charts)
     with out1:
         print("Set parameters above and click 'Update Analysis' to run Tab 1.")
     with out2:
