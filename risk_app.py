@@ -1,7 +1,7 @@
 # ============================================================================
-# Session 02 - General Risk Slide Rule & Financial Impact Engine (v3.0)
+# Session 02 - Interactive Risk & Financial Impact Engine (v3.3 Final)
 # Repo : github.com/sudhir-voleti/colabApps
-# Launch code in Colab:
+# Launch in Colab:
 #   import requests
 #   exec(requests.get("https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/risk_app.py").text)
 #   launch_app()
@@ -15,228 +15,221 @@ from IPython.display import display, HTML
 
 
 def _inr(x):
-    """Format numbers cleanly into Indian Rupees (Lakhs / Crores / Thousands)."""
+    """Format numbers cleanly into Rupees (Lakhs / Crores / Thousands)."""
     a = abs(x)
     if a >= 1e7:
-        return f"₹{x/1e7:.2f} Cr"
+        return f"Rs {x/1e7:.2f} Cr"
     if a >= 1e5:
-        return f"₹{x/1e5:.2f} L"
-    return f"₹{x:,.0f}"
+        return f"Rs {x/1e5:.2f} L"
+    return f"Rs {x:,.0f}"
 
 
-def _make_dist(mean, p2, kind):
-    """
-    Construct parametric distributions.
-    For Log-normal, p2 represents the MEDIAN (M).
-    For Normal/Student-t/Left-skewed, p2 represents SIGMA (s).
-    """
-    if kind.startswith("Normal"):
-        sigma = p2
-        return stats.norm(loc=mean, scale=sigma), sigma, ""
-
-    if kind.startswith("Log-normal"):
-        median_val = p2
-        if mean <= median_val:
-            # Fallback guard if user enters Mean <= Median for right-skew
-            mean = median_val * 1.05
-        
-        # Closed-form parameter extraction from Mean and Median
-        s_log = np.sqrt(2.0 * np.log(mean / median_val))
-        scale_log = median_val
-        dist = stats.lognorm(s=s_log, scale=scale_log)
-        
-        # Implied standard deviation (wobble) in original units
-        implied_sd = mean * np.sqrt(np.exp(s_log**2) - 1.0)
-        note = f"Log-Normal (Right-Skewed): Solved parameters from Mean ({mean}) & Median ({median_val}). Implied Wobble (SD) = {implied_sd:.2f} units."
-        return dist, implied_sd, note
-
-    if kind.startswith("Left-Skewed"):
-        sigma = p2
-        alpha = -5.0  # Left skewness parameter
-        delta = alpha / np.sqrt(1 + alpha**2)
-        scale_sn = sigma / np.sqrt(1 - 2 * (delta**2) / np.pi)
-        loc_sn = mean - scale_sn * delta * np.sqrt(2 / np.pi)
-        return stats.skewnorm(a=alpha, loc=loc_sn, scale=scale_sn), sigma, \
-            "Left-Skewed (Skew-Normal): Mean < Median. Long lower tail (e.g., Uptime %, SLA Delivery %)."
-
-    # Student-t fat-tailed distribution
-    sigma = p2
-    df = 3
-    scale_t = sigma * np.sqrt((df - 2.0) / df)
-    return stats.t(df=df, loc=mean, scale=scale_t), sigma, \
-        "Student-t (df=3): Fat-tailed shape. Heavy tails simulate extreme Black Swan events."
+def _val(w):
+    """Safely fetch float values from widgets."""
+    try:
+        return float(w.value)
+    except (TypeError, ValueError):
+        return None
 
 
 def launch_app():
-    # --- TAB 1 CONTROLS: DISTRIBUTION & TAIL RISK ---
-    ft_mean = widgets.FloatText(value=40.0, description="Baseline Mean (μ):", style={"description_width": "initial"})
-    ft_p2 = widgets.FloatText(value=15.0, description="Wobble (sigma):", style={"description_width": "initial"})
-    ft_thr = widgets.FloatText(value=50.0, description="Threshold Limit:", style={"description_width": "initial"})
+    state = {"p": None, "word": "", "thr": None}
+
+    print("=" * 68)
+    print("  The Risk Slide Rule: Probability, Tail Risk & Financial Impact")
+    print("=" * 68)
+    print("Tab 1 finds the probability. Tab 2 prices it. Press UPDATE to run.\n")
+
+    # ---------------- TAB 1 WIDGETS ----------------
+    dd_kind = widgets.Dropdown(
+        options=["Normal (thin, symmetric)",
+                 "Log-normal (right-skewed: type mean + median)",
+                 "Left-skewed (low crashes: type mean + median or mean + wobble)",
+                 "Student-t (fat-tailed: type mean + wobble)"],
+        description="Shape:", style={"description_width": "initial"},
+        layout=widgets.Layout(width="480px"))
+
+    ft_mean = widgets.FloatText(description="Mean (average):")
+    ft_sd = widgets.FloatText(description="Wobble (sigma):")
+    ft_med = widgets.FloatText(description="Median (typical):")
+    ft_thr = widgets.FloatText(description="Danger line:")
     
     dd_dir = widgets.Dropdown(
-        options=["Risk of EXCEEDING Threshold (Overflow / Capacity Breach)",
-                 "Risk of FALLING BELOW Threshold (Deficit / Shortfall / SLA Drop)"],
-        value="Risk of EXCEEDING Threshold (Overflow / Capacity Breach)",
-        description="Risk Event:", style={"description_width": "initial"}, layout=widgets.Layout(width="480px")
-    )
+        options=["risk of EXCEEDING the line (overflow)",
+                 "risk of FALLING BELOW the line (shortfall)"],
+        description="Event:", style={"description_width": "initial"},
+        layout=widgets.Layout(width="480px"))
     
-    dd_kind = widgets.Dropdown(
-        options=["Normal (Symmetric / Bell Curve)",
-                 "Log-normal (Right-Skewed / High Outliers)",
-                 "Left-Skewed (Low Crashes / SLA Drops)",
-                 "Student-t (Fat-Tailed / Black Swan Prone)"],
-        value="Normal (Symmetric / Bell Curve)",
-        description="Shape:", style={"description_width": "initial"}, layout=widgets.Layout(width="480px")
-    )
+    btn1 = widgets.Button(description="Update Analysis", button_style="success", icon="play")
+    out1 = widgets.Output()
 
-    # Dynamic label update when shape changes
-    def _on_shape_change(change):
-        if change['new'].startswith("Log-normal"):
-            ft_p2.description = "Typical (Median M):"
-            if ft_p2.value >= ft_mean.value:
-                ft_p2.value = round(ft_mean.value * 0.5, 1)
+    # ---------------- TAB 2 WIDGETS ----------------
+    ft_cost = widgets.FloatText(description="Cost per bad event (Rs):")
+    ft_marg = widgets.FloatText(description="Margin lost per event (Rs, 0 if none):")
+    ft_per = widgets.FloatText(value=30.0, description="Periods per month (days/nights):")
+    btn2 = widgets.Button(description="Price it", button_style="warning", icon="rupee")
+    out2 = widgets.Output()
+
+    def _toggle_shape(*args):
+        kind = dd_kind.value
+        if kind.startswith("Log-normal"):
+            ft_sd.layout.display = "none"
+            ft_med.layout.display = "flex"
+        elif kind.startswith("Left-skewed"):
+            ft_sd.layout.display = "flex"
+            ft_med.layout.display = "flex"
         else:
-            ft_p2.description = "Wobble (sigma):"
+            ft_sd.layout.display = "flex"
+            ft_med.layout.display = "none"
 
-    dd_kind.observe(_on_shape_change, names='value')
+    def render1(btn_=None):
+        with out1:
+            out1.clear_output(wait=True)
+            mean = _val(ft_mean)
+            thr = _val(ft_thr)
+            if mean is None or thr is None:
+                print("Fill in the Mean and the Danger line first.")
+                return
 
-    # --- TAB 2 CONTROLS: FINANCIAL ECONOMICS & PROFIT LOSS ---
-    ft_rev = widgets.FloatText(value=180000.0, description="Revenue per Unit/Event (₹):", style={"description_width": "initial"})
-    ft_margin_pct = widgets.FloatText(value=65.0, description="Contribution Margin (%):", style={"description_width": "initial"})
-    ft_fixed_penalty = widgets.FloatText(value=0.0, description="Fixed Penalty / Breach Cost (₹):", style={"description_width": "initial"})
-
-    btn_t1 = widgets.Button(description="Update Risk Analysis", button_style="success", icon="refresh", layout=widgets.Layout(width="240px"))
-    btn_t2 = widgets.Button(description="Update Financial Impact", button_style="success", icon="refresh", layout=widgets.Layout(width="240px"))
-    
-    out_read_t1 = widgets.Output()
-    out_plot_t1 = widgets.Output()
-    out_read_t2 = widgets.Output()
-    out_plot_t2 = widgets.Output()
-
-    def update_all(btn_=None):
-        mean, p2_val = ft_mean.value, ft_p2.value
-        thr = ft_thr.value
-        above = dd_dir.value.startswith("Risk of EXCEEDING")
-        
-        dist, effective_sigma, note = _make_dist(mean, p2_val, dd_kind.value)
-        p_tail = dist.sf(thr) if above else dist.cdf(thr)
-        pct = p_tail * 100.0
-
-        # --- FINANCIAL CALCULATIONS ---
-        rev_per_unit = ft_rev.value
-        margin_pct = ft_margin_pct.value / 100.0
-        profit_per_unit = rev_per_unit * margin_pct
-        fixed_penalty = ft_fixed_penalty.value
-        total_loss_per_event = profit_per_unit + fixed_penalty
-        exp_loss_per_period = p_tail * total_loss_per_event
-
-        # Plot x-range setup
-        x_lo, x_hi = dist.ppf(0.001), dist.ppf(0.999)
-        x_lo = min(x_lo, thr - effective_sigma)
-        x_hi = max(x_hi, thr + effective_sigma)
-        xs = np.linspace(x_lo, x_hi, 600)
-
-        # ---------------- 1. RENDER TAB 1: TAIL RISK PROBABILITY ----------------
-        with out_read_t1:
-            out_read_t1.clear_output(wait=True)
+            above = dd_dir.value.startswith("risk of EXCEEDING")
             word = "exceeds" if above else "falls below"
-            display(HTML(
-                f"<div style='background:#f1f5f9;border-left:5px solid #003366;border-radius:4px;padding:12px;font-size:15px;color:#0f172a'>"
-                f"<b>TAIL RISK PROBABILITY:</b> P(Metric {word} {thr:.1f}) = <b style='color:#dc2626;font-size:18px'>{pct:.2f}%</b><br>"
-                f"<span style='font-size:13px;color:#475569'>Out of 100 operating periods, expect approximately <b>{pct:.1f} breach/overflow events</b>.</span>"
-                f"</div>"
-            ))
-            if note:
-                print(f"\nNote: {note}")
+            note = ""
 
-        with out_plot_t1:
-            out_plot_t1.clear_output(wait=True)
-            fig, ax = plt.subplots(figsize=(8.2, 3.8))
-            ax.plot(xs, dist.pdf(xs), color="#003366", lw=2.2, label=f"Distribution ({dd_kind.value.split(' ')[0]})")
+            # 1. LOG-NORMAL (RIGHT SKEW)
+            if dd_kind.value.startswith("Log-normal"):
+                med = _val(ft_med)
+                if med is None or med <= 0 or mean <= med:
+                    print("Log-normal requires Mean > Median (and both > 0).")
+                    print(f"Your input: Mean={mean}, Median={med}. If Mean < Median, pick 'Left-skewed'.")
+                    return
+                s_log = np.sqrt(2.0 * np.log(mean / med))
+                s_log = min(s_log, 2.5)  # Cap for numerical plotting stability
+                dist = stats.lognorm(s=s_log, scale=med)
+                note = f"Right-skewed Log-normal: Solved from Mean ({mean}) & Median ({med})."
+
+            # 2. LEFT-SKEWED (SKEW-NORMAL)
+            elif dd_kind.value.startswith("Left-skewed"):
+                med = _val(ft_med)
+                sd = _val(ft_sd) or 10.0
+                if med is not None and med > mean:
+                    alpha = -6.0
+                    delta = alpha / np.sqrt(1 + alpha**2)
+                    scale_sn = (med - mean) / (np.sqrt(2/np.pi) * (1 - delta))
+                    scale_sn = max(scale_sn, 0.1)
+                    loc_sn = mean - scale_sn * delta * np.sqrt(2/np.pi)
+                    dist = stats.skewnorm(a=alpha, loc=loc_sn, scale=scale_sn)
+                    note = f"Left-skewed: Solved from Mean ({mean}) & Median ({med})."
+                else:
+                    alpha = -5.0
+                    dist = stats.skewnorm(a=alpha, loc=mean, scale=sd)
+                    note = f"Left-skewed: Skew-Normal with Mean={mean}, Wobble={sd}."
+
+            # 3. STUDENT-T (FAT TAILS)
+            elif dd_kind.value.startswith("Student-t"):
+                sd = _val(ft_sd)
+                if sd is None or sd <= 0:
+                    print("Wobble (sigma) must be a positive number.")
+                    return
+                df = 3
+                dist = stats.t(df=df, loc=mean, scale=sd * np.sqrt((df - 2.0) / df))
+                note = "Student-t (df=3): Fat-tailed shape with heavy extreme event risks."
+
+            # 4. NORMAL
+            else:
+                sd = _val(ft_sd)
+                if sd is None or sd <= 0:
+                    print("Wobble (sigma) must be a positive number.")
+                    return
+                dist = stats.norm(loc=mean, scale=sd)
+
+            p_tail = dist.sf(thr) if above else dist.cdf(thr)
+            state["p"] = float(p_tail)
+            state["word"] = word
+            state["thr"] = thr
+
+            # Plotting x-bounds calculation
+            x_lo, x_hi = dist.ppf(0.001), dist.ppf(0.999)
+            x_lo = min(x_lo, thr - abs(mean - thr))
+            x_hi = max(x_hi, thr + abs(mean - thr))
+            xs = np.linspace(x_lo, x_hi, 600)
+
+            fig, ax = plt.subplots(figsize=(8.5, 3.8))
+            ax.plot(xs, dist.pdf(xs), color="#003366", lw=2.2)
             mask = xs >= thr if above else xs <= thr
-            ax.fill_between(xs[mask], dist.pdf(xs[mask]), color="#DC2626", alpha=0.45, label=f"Tail Risk Area ({pct:.1f}%)")
-            ax.axvline(thr, color="#DC2626", ls="--", lw=2, label=f"Threshold = {thr:.1f}")
+            ax.fill_between(xs[mask], dist.pdf(xs[mask]), color="#DC2626", alpha=0.45)
+            ax.axvline(thr, color="#DC2626", ls="--", lw=1.8, label=f"Danger line = {thr:.1f}")
             
-            m, med = dist.mean(), dist.median()
-            ax.axvline(m, color="#D97706", ls="-", lw=1.6, label=f"Mean = {m:.1f}")
-            if abs(med - m) > 0.02 * (effective_sigma if effective_sigma > 0 else 1):
-                ax.axvline(med, color="#059669", ls=":", lw=1.8, label=f"Median = {med:.1f}")
-                
-            word_title = "Overflow Zone (> Threshold)" if above else "Deficit Zone (< Threshold)"
-            ax.set_title(f"Distribution & Risk Boundary Analysis — {word_title}", fontweight="bold", fontsize=11)
-            ax.set_xlabel("Metric Scale")
-            ax.set_ylabel("Probability Density")
-            ax.legend(loc="upper right", frameon=True)
+            m_val, med_val = dist.mean(), dist.median()
+            ax.axvline(m_val, color="#059669", ls="-", lw=1.6, label=f"mean = {m_val:.1f}")
+            if abs(med_val - m_val) > 0.02 * (abs(m_val) if m_val != 0 else 1):
+                ax.axvline(med_val, color="#2563EB", ls=":", lw=1.8, label=f"median = {med_val:.1f}")
+
+            ax.set_title(f"{dd_kind.value.split(' (')[0]} | {word} {thr:.1f} shaded", fontweight="bold")
+            ax.legend(loc="upper right")
             ax.grid(True, ls=":", alpha=0.6)
             plt.tight_layout()
             plt.show()
 
-        # ---------------- 2. RENDER TAB 2: FINANCIAL IMPACT ----------------
-        with out_read_t2:
-            out_read_t2.clear_output(wait=True)
+            pct = p_tail * 100
             display(HTML(
-                f"<div style='background:#fee2e2;border:2px solid #DC2626;border-radius:8px;padding:14px;color:#7f1d1d'>"
-                f"<h4 style='margin:0 0 6px 0;color:#991b1b'><b>EXPECTED FINANCIAL & PROFIT LOSS (E[Impact])</b></h4>"
-                f"• <b>Lost Profit per Breach Unit:</b> {_inr(profit_per_unit)} <i>(Revenue: {_inr(rev_per_unit)} × Margin: {margin_pct*100:.0f}%)</i><br>"
-                f"• <b>Fixed Penalty / Cost per Breach:</b> {_inr(fixed_penalty)}<br>"
-                f"• <b>Total Cost per Bad Event:</b> <b style='font-size:15px'>{_inr(total_loss_per_event)}</b><br><hr style='border-top:1px dashed #fca5a5;margin:8px 0'>"
-                f"<b>EXPECTED LOSS PER OPERATING PERIOD:</b> <b style='font-size:18px;color:#dc2626'>{_inr(exp_loss_per_period)}</b><br>"
-                f"<span style='font-size:13px;color:#450a0a'>"
-                f"<b>Monthly Expected Loss (30 days):</b> {_inr(exp_loss_per_period * 30)} &nbsp;|&nbsp; "
-                f"<b>Annual Expected Loss (365 days):</b> {_inr(exp_loss_per_period * 365)}"
-                f"</span></div>"
-            ))
+                f"<div style='background:#fee2e2;border:2px solid #DC2626;"
+                f"border-radius:8px;padding:14px;font-size:16px'>"
+                f"P(metric {word} {thr:.1f}) = <b>{pct:.2f}%</b>"
+                f"<br><span style='font-size:14px'>about {pct:.0f} operating periods in every 100</span></div>"))
+            if note:
+                print("Note: " + note)
+            print("Carried to Tab 2. Click 'Price it' in Tab 2 when ready.")
 
-        with out_plot_t2:
-            out_plot_t2.clear_output(wait=True)
-            fig, ax = plt.subplots(figsize=(8.2, 3.4))
-            periods = ["Per Period / Day", "Monthly (30 Days)", "Annual (365 Days)"]
-            losses = [exp_loss_per_period, exp_loss_per_period * 30, exp_loss_per_period * 365]
+        # Clear Tab 2 output when Tab 1 parameters are re-updated
+        with out2:
+            out2.clear_output(wait=True)
+            print("Probability updated in Tab 1. Enter cost numbers below and click 'Price it'.")
+
+    def render2(btn_=None):
+        with out2:
+            out2.clear_output(wait=True)
+            if state["p"] is None:
+                print("⚠️ Run Tab 1 first (press 'Update Analysis') — the probability comes from Tab 1.")
+                return
+            cost, marg, per = _val(ft_cost), _val(ft_marg), _val(ft_per)
+            if cost is None or per is None or per <= 0:
+                print("⚠️ Fill in cost per event and periods per month (a positive number).")
+                return
+            marg = marg or 0.0
+            price = cost + marg
+            exp_p = state["p"] * price
             
-            bars = ax.bar(periods, losses, color=["#f87171", "#ef4444", "#dc2626"], width=0.45)
-            ax.set_ylabel("Expected Profit Impact (₹)")
-            ax.set_title("Expected Financial Loss Across Operating Horizons", fontweight="bold", fontsize=11)
-            
-            for bar in bars:
-                yval = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2.0, yval + (0.02 * (max(losses) if max(losses) > 0 else 1)), _inr(yval), ha='center', va='bottom', fontweight='bold', fontsize=9.5)
-                
-            ax.set_ylim(0, max(losses) * 1.25 if max(losses) > 0 else 10)
-            ax.grid(axis='y', ls=":", alpha=0.6)
-            plt.tight_layout()
-            plt.show()
+            display(HTML(
+                f"<div style='background:#fef3c7;border:2px solid #D97706;"
+                f"border-radius:8px;padding:14px;font-size:16px'>"
+                f"P = {state['p']*100:.2f}% | Price per event = {_inr(price)}<br>"
+                f"EXPECTED LOSS per period = P x price = <b>{_inr(exp_p)}</b><br>"
+                f"<span style='font-size:14px'>Monthly Expected Loss ({per:.0f} periods): <b>{_inr(exp_p*per)}</b> &nbsp;|&nbsp; "
+                f"Annual Expected Loss ({per*12:.0f} periods): <b>{_inr(exp_p*per*12)}</b></span></div>"))
+            print("Assumption: one bad event per period crossing the line.")
 
-    # Bind button clicks
-    btn_t1.on_click(update_all)
-    btn_t2.on_click(update_all)
+    dd_kind.observe(_toggle_shape, names="value")
+    btn1.on_click(render1)
+    btn2.on_click(render2)
+    _toggle_shape()
 
-    # --- BUILD TAB UI STRUCTURE ---
-    tab_app = widgets.Tab()
+    # Placeholders on initial load
+    with out1:
+        print("Set parameters above and click 'Update Analysis' to run Tab 1.")
+    with out2:
+        print("Run Tab 1 first, then fill in cost numbers above and click 'Price it'.")
 
-    tab1_layout = widgets.VBox([
-        widgets.HBox([ft_mean, ft_p2]),
-        widgets.HBox([ft_thr, dd_dir]),
-        dd_kind,
-        btn_t1,
-        out_read_t1,
-        out_plot_t1
-    ])
-
-    tab2_layout = widgets.VBox([
-        widgets.HTML("<b style='color:#003366;'>Unit Economics & Margin Inputs:</b>"),
-        widgets.HBox([ft_rev, ft_margin_pct]),
-        ft_fixed_penalty,
-        btn_t2,
-        out_read_t2,
-        out_plot_t2
-    ])
-
-    tab_app.children = [tab1_layout, tab2_layout]
-    tab_app.set_title(0, "📊 Tail Risk Probability")
-    tab_app.set_title(1, "💰 Financial Impact & Profit Loss")
-
-    print("=" * 68)
-    print("  The Risk Slide Rule: Interactive Distribution & Financial Impact Engine")
-    print("=" * 68)
-    print("  --> Enter parameters above and click 'Update' to render charts.\n")
-    display(tab_app)
+    tab = widgets.Tab()
+    tab.children = [
+        widgets.VBox([dd_kind,
+                      widgets.HBox([ft_mean, ft_sd]),
+                      ft_med,
+                      widgets.HBox([ft_thr, dd_dir]),
+                      btn1, out1]),
+        widgets.VBox([widgets.HTML("<b style='color:#003366;'>Financial Impact Inputs:</b><br>"
+                                   "<i>The tail probability carries over automatically from Tab 1.</i><br><br>"),
+                      ft_cost, ft_marg, ft_per, btn2, out2])
+    ]
+    tab.set_title(0, "1. Shape & Tail Risk")
+    tab.set_title(1, "2. Price the Risk")
+    display(tab)
