@@ -24,7 +24,7 @@ def launch_app():
                                 description="Upload CSV",
                                 button_style="primary", icon="upload")
     print("=" * 68)
-    print("  The Multivariate Lens: the Wall, and the Reveal")
+    print("  The Multivariate Lens: Correln, and Bivariate-scatter")
     print("=" * 68)
     print("Upload any CSV (from the LMS) to begin.\n")
     display(upload)
@@ -54,7 +54,7 @@ def _build(df):
         print(f"First 10 of {df.shape[0]} rows:")
         display(df.head(10))
 
-    # ---------------- TAB 1: The Wall ----------------
+    # ---------------- TAB 1: Correln ----------------
     out_wall = widgets.Output()
     with out_wall:
         if len(num_cols) < 2:
