@@ -24,7 +24,7 @@ def launch_app():
                                 description="Upload CSV",
                                 button_style="primary", icon="upload")
     print("=" * 68)
-    print("  The Multivariate Lens: Correln, and Bivariate-scatter")
+    print("  The Multivariate Lens: the Wall, and the Reveal")
     print("=" * 68)
     print("Upload any CSV (from the LMS) to begin.\n")
     display(upload)
@@ -54,7 +54,7 @@ def _build(df):
         print(f"First 10 of {df.shape[0]} rows:")
         display(df.head(10))
 
-    # ---------------- TAB 1: Correln ----------------
+    # ---------------- TAB 1: The Wall ----------------
     out_wall = widgets.Output()
     with out_wall:
         if len(num_cols) < 2:
@@ -75,8 +75,8 @@ def _build(df):
                     ax.text(j, i, f"{corr.values[i, j]:.2f}",
                             ha="center", va="center", fontsize=9)
             fig.colorbar(im, shrink=0.8)
-            ax.set_title("The Wall: pairwise co-movement of every "
-                         "numeric column", fontweight="bold")
+            ax.set_title("Pairwise co-movement of numeric columns",
+                         fontweight="bold")
             plt.tight_layout()
             plt.show()
 
@@ -86,11 +86,11 @@ def _build(df):
                             or num_cols, description="Y:")
     dd_s = widgets.Dropdown(options=["(no split)"] + cat_cols + num_cols,
                             value="(no split)", description="Split by:")
-    btn = widgets.Button(description="Reveal", button_style="success",
+    btn = widgets.Button(description="Show", button_style="success",
                          icon="search")
     out_rev = widgets.Output()
 
-    def reveal(btn_=None):
+    def show_split(btn_=None):
         with out_rev:
             out_rev.clear_output(wait=True)
             x, y, s = dd_x.value, dd_y.value, dd_s.value
@@ -127,8 +127,8 @@ def _build(df):
                            color="#003366")
             ax.set_xlabel(x)
             ax.set_ylabel(y)
-            ax.set_title("Same two columns, split by a third - "
-                         "did the relationship survive?", fontweight="bold")
+            ax.set_title("Same two columns, split by a third",
+                         fontweight="bold")
             if groups:
                 ax.legend()
             ax.grid(True, ls=":", alpha=0.5)
@@ -139,7 +139,7 @@ def _build(df):
                 print("was carrying a third variable's shadow. That is the")
                 print("whole lesson of today.")
 
-    btn.on_click(reveal)
+    btn.on_click(show_split)
     if len(num_cols) >= 2:
         dd_y.value = num_cols[1]
 
@@ -148,6 +148,6 @@ def _build(df):
                     widgets.VBox([widgets.HBox([dd_x, dd_y]),
                                   dd_s, btn, out_rev])]
     tab.set_title(0, "0. Data Preview")
-    tab.set_title(1, "1. The Wall")
-    tab.set_title(2, "2. The Reveal")
+    tab.set_title(1, "1. Correln Tbl")
+    tab.set_title(2, "2. ScatterPlot")
     display(tab)
