@@ -7,11 +7,9 @@ from google.colab import files
 
 def inspect_and_audit():
     """
-    Uploads CSV files in Google Colab and outputs ONLY a raw Markdown block 
-    containing schema data and audit diagnostics for immediate copy-pasting into AI.
-    Automatically purges old CSVs to prevent (1), (2) filename suffix duplicates.
+    Uploads CSVs, purges old files, and outputs a Markdown audit block 
+    including 2-row preview samples for AI visual type checking.
     """
-    # PRECISE INSERT LOCATION: Purge old CSVs before triggering upload
     for old_file in glob.glob("*.csv"):
         try:
             os.remove(old_file)
@@ -58,9 +56,9 @@ def inspect_and_audit():
             if df[col].dtype == 'object':
                 sample_vals = df[col].dropna().astype(str).head(10).tolist()
                 if any(re.search(r'[₹$%,]', val) for val in sample_vals):
-                    anomalies.append(f"Column '{col}' has formatted numeric strings (currency symbols/commas).")
+                    anomalies.append(f"Column '{col}' contains formatted numeric strings (currency/commas).")
                 if any(val != val.strip() for val in sample_vals):
-                    anomalies.append(f"Column '{col}' has trailing/leading whitespace.")
+                    anomalies.append(f"Column '{col}' has whitespace padding.")
             if df[col].nunique(dropna=False) == 1:
                 anomalies.append(f"Column '{col}' is constant (only 1 unique value).")
 
@@ -78,16 +76,21 @@ def inspect_and_audit():
             file_block += "- Missing Values: None\n"
 
         if anomalies:
-            file_block += "- Warnings:\n"
+            file_block += "- Automated Quality Warnings:\n"
             for warning in anomalies:
                 file_block += f"  * {warning}\n"
         else:
-            file_block += "- Warnings: None\n"
+            file_block += "- Automated Quality Warnings: None\n"
+
+        # Add 2-row sample preview for visual AI inspection
+        file_block += "- **First 2 Rows Sample:**\n"
+        file_block += "```text\n"
+        file_block += df.head(2).to_string(index=False) + "\n"
+        file_block += "```\n"
 
         file_block += "\n" + "-" * 40 + "\n"
         markdown_output.append(file_block)
 
-    # Clear terminal output and display ONLY the pure prompt text
     print("\n" * 2)
     print("=" * 10 + " COPY ONLY THE TEXT BELOW THIS LINE " + "=" * 10 + "\n")
     print("\n".join(markdown_output))
