@@ -1,5 +1,7 @@
 import io
 import re
+import glob
+import os
 import pandas as pd
 from google.colab import files
 
@@ -7,7 +9,15 @@ def inspect_and_audit():
     """
     Uploads CSV files in Google Colab and outputs ONLY a raw Markdown block 
     containing schema data and audit diagnostics for immediate copy-pasting into AI.
+    Automatically purges old CSVs to prevent (1), (2) filename suffix duplicates.
     """
+    # PRECISE INSERT LOCATION: Purge old CSVs before triggering upload
+    for old_file in glob.glob("*.csv"):
+        try:
+            os.remove(old_file)
+        except Exception:
+            pass
+
     print("Select all CSV files to upload...")
     uploaded = files.upload()
     
