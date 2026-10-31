@@ -81,7 +81,6 @@ setup_status_out = widgets.Output()
 pca_out = widgets.Output()
 jsm_out = widgets.Output()
 spider_out = widgets.Output()
-data_out = widgets.Output()
 
 
 # ---------------------------------------------------------------- upload handlers
@@ -188,7 +187,7 @@ def plot_jsm(mydata, pref, k0, k1):
     with jsm_out:
         clear_output(wait=True)
         display(Markdown("## Joint space map"))
-        fig, ax = plt.subplots(figsize=(7, 7))
+        fig, ax = plt.subplots(figsize=(9.5, 8.5))
         ax.set_xlim(-1.5, 1.5)
         ax.set_ylim(-1.5, 1.5)
         ax.axhline(0, color="black", linewidth=0.8)
@@ -254,21 +253,25 @@ def plot_spider(mydata):
         plt.tight_layout()
         plt.show()
 
-
-def render_data_tables(mydata, pref):
-    with data_out:
-        clear_output(wait=True)
-        display(Markdown("### Perceptual data (selected attributes)"))
-        d = PERC.loc[list(attr_widget.value)].copy()
-        d.insert(0, "Attributes", d.index)
-        display(html_table(d, index=False))
-        if pref is not None:
-            display(Markdown("### Preference data (selected users)"))
-            d1 = pref.copy()
-            d1.insert(0, "User", d1.index)
-            display(html_table(d1, index=False))
-        else:
-            display(Markdown("### Preference data\nNo preference CSV uploaded."))
+        # Relative brand strength: mean/min/max profile across the selected attributes.
+        # (Radar polygon *area* is not used: it depends on attribute order around the circle.)
+        strength = pd.DataFrame(
+            {
+                "Firm": sub.index,
+                "Mean profile": sub.mean(axis=1).to_numpy(),
+                "Min": sub.min(axis=1).to_numpy(),
+                "Max": sub.max(axis=1).to_numpy(),
+            }
+        ).sort_values("Mean profile", ascending=False).round(3)
+        display(Markdown("### Relative brand strength (across selected attributes)"))
+        display(html_table(strength, index=False))
+        fig, ax = plt.subplots(figsize=(7, max(2.5, 0.4 * len(strength) + 1.5)))
+        ax.barh(strength["Firm"], strength["Mean profile"], color="#4C78A8")
+        ax.invert_yaxis()
+        ax.set_xlabel("Mean attribute rating")
+        ax.set_title("Brand strength = average profile across selected attributes")
+        plt.tight_layout()
+        plt.show()
 
 
 def render_all(_):
@@ -277,17 +280,16 @@ def render_all(_):
         plot_pca_variance(mydata)
         plot_jsm(mydata, pref, float(k0_widget.value), float(k1_widget.value))
         plot_spider(mydata)
-        render_data_tables(mydata, pref)
         with setup_status_out:
             clear_output(wait=True)
             n_users = 0 if pref is None else pref.shape[0]
             display(
                 Markdown(
                     f"**Plots rendered.** Firms: **{mydata.shape[0]}**, attributes: **{mydata.shape[1]}**, "
-                    f"users: **{n_users}**. See Tabs 2–5."
+                    f"users: **{n_users}**. PCA Variance in Tab 2, Spider Chart in Tab 4."
                 )
             )
-        tabs.selected_index = 2
+        tabs.selected_index = 3
     except Exception as exc:
         with setup_status_out:
             clear_output(wait=True)
@@ -321,15 +323,21 @@ tab1 = widgets.VBox(
         attr_widget,
         firm_widget,
         user_widget,
+    ]
+)
+tab3 = widgets.VBox(
+    [
+        widgets.HTML("<h2>3. Joint Space Map</h2>"),
         k0_widget,
         k1_widget,
         render_button,
         setup_status_out,
+        jsm_out,
     ]
 )
-tabs = widgets.Tab(children=[tab0, tab1, pca_out, jsm_out, spider_out, data_out])
+tabs = widgets.Tab(children=[tab0, tab1, pca_out, tab3, spider_out])
 for index, title in enumerate(
-    ["0. Case & Data", "1. Setup", "2. PCA Variance", "3. JSM Plot", "4. Spider Chart", "5. Data"]
+    ["0. Case & Data", "1. Setup", "2. PCA Variance", "3. JSM Plot", "4. Spider Chart"]
 ):
     tabs.set_title(index, title)
 
