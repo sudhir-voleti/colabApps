@@ -22,6 +22,7 @@ DESIGN_SPEC = None
 TRAIN_X = None
 PREDICTION_OUTPUT = None
 PRED_SOURCE_DF = None
+TRAIN_DF = None
 DROPPED_TERMS = []
 
 
@@ -525,15 +526,11 @@ def refresh_x_options(change=None):
 def preview_data():
     with data_preview_out:
         clear_output(wait=True)
-        if DATA is None and SCENARIO_DATA is None:
-            display(Markdown("Upload CBC training data. Prediction data is optional."))
+        if DATA is None:
+            display(Markdown("Upload CBC training data. Prediction data is optional (Tab 6)."))
             return
-        if DATA is not None:
-            display(Markdown(f"### CBC training preview — {DATA.shape[0]:,} rows × {DATA.shape[1]:,} columns"))
-            display(DATA.head(10))
-        if SCENARIO_DATA is not None:
-            display(Markdown(f"### Prediction data preview — {SCENARIO_DATA.shape[0]:,} rows × {SCENARIO_DATA.shape[1]:,} columns"))
-            display(SCENARIO_DATA.head(10))
+        display(Markdown(f"### CBC training preview — {DATA.shape[0]:,} rows × {DATA.shape[1]:,} columns"))
+        display(DATA.head(10))
 
 
 def on_train_upload(change):
@@ -562,9 +559,15 @@ def on_scenario_upload(change):
     global SCENARIO_DATA
     try:
         SCENARIO_DATA = read_upload(scenario_upload, "prediction data")
-        preview_data()
+        if MODEL_RESULT is not None and DESIGN_SPEC is not None and TRAIN_DF is not None:
+            # Model already fitted: (re)render predictions on the new data right away.
+            render_predictions(TRAIN_DF, TRAIN_X, MODEL_RESULT, DESIGN_SPEC)
+        else:
+            with prediction_out:
+                clear_output(wait=True)
+                display(Markdown("Prediction data loaded. Fit the model (Tab 2) to see predictions."))
     except Exception as exc:
-        with data_preview_out:
+        with prediction_out:
             clear_output(wait=True)
             display(Markdown(f"**Prediction-file error:** {exc}"))
 
@@ -732,22 +735,36 @@ def compute_wtp(_):
         if beta_price == 0 or not np.isfinite(beta_price):
             raise ValueError("Price coefficient is zero or non-finite; WTP is undefined.")
 
+        params = MODEL_RESULT.params
+        spec = DESIGN_SPEC
         rows = []
-        for term, coef in MODEL_RESULT.params.items():
-            if term == price:
+        covered = set()
+        for col in spec["xs"]:
+            if col == price:
                 continue
-            rows.append(
-                {
-                    "Term": term,
-                    "Coefficient": coef,
-                    "WTP (money)": -coef / beta_price,
-                }
-            )
+            if col in spec["categorical"]:
+                levels = spec["levels"][col]
+                baseline = levels[0] if spec["first_baseline"] else levels[-1]
+                ordered = [l for l in levels if l != baseline] + [baseline]
+                for level in ordered:
+                    term = f"{col} = {level}"
+                    if level == baseline:
+                        rows.append({"Term": term, "Coefficient": 0.0, "WTP (money)": 0.0, "Note": "baseline level"})
+                    elif term in params.index:
+                        covered.add(term)
+                        rows.append({"Term": term, "Coefficient": params[term], "WTP (money)": -params[term] / beta_price, "Note": ""})
+            elif col in params.index:
+                covered.add(col)
+                rows.append({"Term": col, "Coefficient": params[col], "WTP (money)": -params[col] / beta_price, "Note": "per unit"})
+        for term, coef in params.items():
+            if term == price or term in covered:
+                continue
+            rows.append({"Term": term, "Coefficient": coef, "WTP (money)": -coef / beta_price, "Note": ""})
         wtp = pd.DataFrame(rows).round(4)
         with wtp_out:
             clear_output(wait=True)
             display(Markdown(f"## Willingness to pay (WTP = −β / β_price; β_price = {beta_price:.3g})"))
-            display(Markdown("Positive WTP = money value of that level/unit versus its baseline."))
+            display(Markdown("Positive WTP = money value of that level/unit versus its baseline. Baseline levels are shown with zero coefficient and zero WTP by construction."))
             display(html_table(wtp))
         tabs.selected_index = 5
     except Exception as exc:
@@ -926,7 +943,7 @@ def compute_profile_sim(_):
 
 
 def fit_cbc_model(_):
-    global MODEL_RESULT, DESIGN_SPEC, TRAIN_X, DROPPED_TERMS
+    global MODEL_RESULT, DESIGN_SPEC, TRAIN_X, TRAIN_DF, DROPPED_TERMS
     try:
         df, spec = prepare_training_data()
         X_full = build_design(df, spec, training=True)
@@ -959,6 +976,7 @@ def fit_cbc_model(_):
         MODEL_RESULT = result
         DESIGN_SPEC = spec
         TRAIN_X = X
+        TRAIN_DF = df
 
         # Refresh the WTP price dropdown with the fitted numeric attributes.
         numeric_xs = [c for c in spec["xs"] if c not in spec["categorical"] and c in result.params.index]
@@ -1011,7 +1029,7 @@ task/choice-set ID, a 0/1 chosen indicator, and one or more attribute columns.
 Every respondent-task choice set must contain at least two alternatives and exactly one chosen row.
 Column names are selected after upload, so any CSV following this structure can be used.
 An optional prediction-data CSV (same respondent, task, and attribute columns; no chosen
-indicator needed) drives the Predictions and Profile Simulator tabs.
+indicator needed) can be uploaded in Tab 6 to drive the Predictions and Profile Simulator tabs.
 """
 
 tab0 = widgets.VBox(
@@ -1019,8 +1037,7 @@ tab0 = widgets.VBox(
         widgets.HTML("<h2>0. Case & Data</h2>"),
         widgets.HTML(case_text),
         train_upload,
-        scenario_upload,
-        widgets.HTML("<small>The prediction-data CSV is optional. It uses the same respondent, task, alternative, and attribute columns.</small>"),
+        widgets.HTML("<small>The optional prediction-data CSV is uploaded separately in Tab 6 (Predictions).</small>"),
         data_preview_out,
     ]
 )
@@ -1081,7 +1098,19 @@ tab7 = widgets.VBox(
         sim_out,
     ]
 )
-tabs = widgets.Tab(children=[tab0, tab1, tab2, tab3, tab4, tab5, prediction_out, tab7])
+tab6 = widgets.VBox(
+    [
+        widgets.HTML("<h2>6. Predictions</h2>"),
+        widgets.HTML(
+            "<small>Optionally upload a prediction-data CSV (same respondent, task, and attribute "
+            "columns; no chosen indicator needed). If the model is already fitted, predictions render "
+            "immediately on upload; without it, predictions are shown in-sample on the training data.</small>"
+        ),
+        scenario_upload,
+        prediction_out,
+    ]
+)
+tabs = widgets.Tab(children=[tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7])
 for index, title in enumerate(
     [
         "0. Case & Data",
