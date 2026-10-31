@@ -23,7 +23,6 @@ TRAIN_X = None
 PREDICTION_OUTPUT = None
 PRED_SOURCE_DF = None
 DROPPED_TERMS = []
-ALL_ALTS = "(all alternatives)"
 
 
 def uploaded_content(upload_widget):
@@ -165,6 +164,11 @@ def prepare_training_data():
         "xs": xs,
         "categorical": sorted(categorical),
         "levels": {c: sorted_levels(df[c]) for c in categorical},
+        "values": {
+            c: sorted(pd.to_numeric(df[c]).dropna().unique().tolist())
+            for c in xs
+            if c not in categorical
+        },
         "first_baseline": bool(baseline_widget.value),
         "include_asc": bool(asc_widget.value and alternative != NONE),
         "alt_levels": sorted_levels(df[alternative]) if alternative != NONE else [],
@@ -329,7 +333,7 @@ def coefficient_table(result):
             "p-value": result.pvalues.values,
             "CI 2.5%": ci.iloc[:, 0].values,
             "CI 97.5%": ci.iloc[:, 1].values,
-            "exp(Coefficient)": np.exp(result.params.values),
+            "Odds ratio": np.exp(result.params.values),
         }
     )
     return table.round(5)
@@ -454,15 +458,14 @@ price_widget = widgets.Dropdown(
 wtp_button = widgets.Button(description="Calculate WTP", button_style="warning", icon="calculator")
 formula_html = widgets.HTML("Select variables to preview the choice model.")
 
-shift_set_widget = widgets.Dropdown(
-    description="Choice set", style={"description_width": "initial"}, layout=widgets.Layout(width="95%")
+sim_set_widget = widgets.Dropdown(
+    description="Reference lineup (choice set)", style={"description_width": "initial"}, layout=widgets.Layout(width="95%")
 )
-shift_attr_widget = widgets.Dropdown(description="Attribute to change", style={"description_width": "initial"})
-shift_alt_widget = widgets.Dropdown(description="Apply change to", style={"description_width": "initial"})
-shift_level_widget = widgets.Dropdown(description="New level", style={"description_width": "initial"})
-shift_value_widget = widgets.FloatText(description="New value", style={"description_width": "initial"})
-shift_button = widgets.Button(description="Compare shares", button_style="info", icon="exchange")
-shift_out = widgets.Output()
+sim_mode_widget = widgets.Dropdown(description="Entry mode", style={"description_width": "initial"})
+sim_profile_box = widgets.VBox()
+SIM_ATTR_WIDGETS = {}
+sim_button = widgets.Button(description="Simulate product entry", button_style="info", icon="magic")
+sim_out = widgets.Output()
 
 data_preview_out = widgets.Output()
 setup_status_out = widgets.Output()
@@ -641,6 +644,13 @@ def render_results(result, groups, k):
         display(html_table(fit_statistics(result, groups, k)))
         display(Markdown("### Utility coefficients"))
         display(html_table(coefficient_table(result)))
+        display(
+            Markdown(
+                "<small>Odds ratio = exp(β): the multiplicative effect on choice odds — versus the baseline "
+                "level for categorical terms, per unit for numeric terms. Values farther from 1 mean "
+                "stronger effects; 1 means no effect.</small>"
+            )
+        )
 
 
 def render_insights(df, X, result, spec):
@@ -677,7 +687,7 @@ def render_predictions(train_df, train_X, result, spec):
         include_choice = spec["choice"] in scenario_df.columns
 
     PRED_SOURCE_DF = source
-    refresh_shift_options()
+    refresh_sim_options()
     PREDICTION_OUTPUT = build_prediction_output(source, X, result, spec, include_choice)
     with prediction_out:
         clear_output(wait=True)
@@ -739,7 +749,7 @@ def compute_wtp(_):
             display(Markdown(f"## Willingness to pay (WTP = −β / β_price; β_price = {beta_price:.3g})"))
             display(Markdown("Positive WTP = money value of that level/unit versus its baseline."))
             display(html_table(wtp))
-        tabs.selected_index = 4
+        tabs.selected_index = 5
     except Exception as exc:
         with wtp_out:
             clear_output(wait=True)
@@ -764,11 +774,16 @@ def plot_choice_shares(out, max_sets=8):
     plt.show()
 
 
-def predict_probabilities(df, spec):
-    """Grouped softmax probabilities for a prediction/training dataframe."""
+def predict_utilities(df, spec):
+    """Deterministic utility for each row of a prediction/training dataframe."""
     X = build_design(df, spec, training=False)
     X = X.reindex(columns=spec["model_columns"], fill_value=0.0)
-    utilities = X.to_numpy(dtype=float) @ MODEL_RESULT.params.to_numpy(dtype=float)
+    return X.to_numpy(dtype=float) @ MODEL_RESULT.params.to_numpy(dtype=float)
+
+
+def predict_probabilities(df, spec):
+    """Grouped softmax probabilities for a prediction/training dataframe."""
+    utilities = predict_utilities(df, spec)
     return grouped_probabilities(utilities, df["_group"].to_numpy())
 
 
@@ -778,114 +793,136 @@ def alternative_labels(sub, spec):
     return [str(i + 1) for i in range(len(sub))]
 
 
-def refresh_shift_options():
-    """Populate the Share Shift controls after a model fit/prediction run."""
+def refresh_sim_options():
+    """Populate the Profile Simulator controls after a model fit/prediction run."""
     if PRED_SOURCE_DF is None or DESIGN_SPEC is None:
         return
+    spec = DESIGN_SPEC
     sets = PRED_SOURCE_DF["_group"].drop_duplicates().tolist()
-    shift_set_widget.options = sets
+    sim_set_widget.options = sets
     if sets:
-        shift_set_widget.value = sets[0]
-    shift_attr_widget.options = list(DESIGN_SPEC["xs"])
-    refresh_shift_alt_options()
-    refresh_shift_value_control()
+        sim_set_widget.value = sets[0]
+
+    SIM_ATTR_WIDGETS.clear()
+    children = []
+    for col in spec["xs"]:
+        if col in spec["categorical"]:
+            options = list(spec["levels"][col])
+        else:
+            options = list(spec["values"].get(col, []))
+        dd = widgets.Dropdown(description=col, options=options, style={"description_width": "initial"})
+        SIM_ATTR_WIDGETS[col] = dd
+        children.append(dd)
+    sim_profile_box.children = children
+    refresh_sim_mode_options()
 
 
-def refresh_shift_alt_options(change=None):
-    if PRED_SOURCE_DF is None or DESIGN_SPEC is None or shift_set_widget.value is None:
+def refresh_sim_mode_options(change=None):
+    """Entry mode: add as a new option, or replace one existing alternative."""
+    if PRED_SOURCE_DF is None or DESIGN_SPEC is None or sim_set_widget.value is None:
         return
-    sub = PRED_SOURCE_DF[PRED_SOURCE_DF["_group"].eq(shift_set_widget.value)]
+    sub = PRED_SOURCE_DF[PRED_SOURCE_DF["_group"].eq(sim_set_widget.value)]
     labels = alternative_labels(sub, DESIGN_SPEC)
-    shift_alt_widget.options = labels + [ALL_ALTS]
-    shift_alt_widget.value = labels[0] if labels else ALL_ALTS
+    options = [("Add as a new option", ("add", None))]
+    options += [(f"Replace: {lab}", ("replace", lab)) for lab in labels]
+    sim_mode_widget.options = options
+    sim_mode_widget.value = ("add", None)
 
 
-def refresh_shift_value_control(change=None):
-    """Show a level dropdown for categorical attributes, a value box for numeric."""
-    if DESIGN_SPEC is None or shift_attr_widget.value is None:
-        return
-    attr = shift_attr_widget.value
-    if attr in DESIGN_SPEC["categorical"]:
-        shift_level_widget.options = list(DESIGN_SPEC["levels"][attr])
-        shift_level_widget.layout.display = ""
-        shift_value_widget.layout.display = "none"
-    else:
-        shift_level_widget.layout.display = "none"
-        shift_value_widget.layout.display = ""
-        if PRED_SOURCE_DF is not None and attr in PRED_SOURCE_DF.columns:
-            shift_value_widget.value = float(pd.to_numeric(PRED_SOURCE_DF[attr]).mean())
-
-
-def compute_share_shift(_):
-    """Probability-space companion: change one attribute in one choice set and
-    compare predicted shares before vs after. Share shifts are scenario-specific."""
+def compute_profile_sim(_):
+    """Build a product profile from dropdowns, compute its net utility, and show
+    predicted shares of the reference lineup before vs after its entry."""
     try:
         if MODEL_RESULT is None or DESIGN_SPEC is None:
             raise ValueError("Fit the CBC logit model first (Tab 2).")
         if PRED_SOURCE_DF is None:
             raise ValueError("No prediction data available.")
+        if not SIM_ATTR_WIDGETS:
+            raise ValueError("Profile controls are not ready; refit the model.")
         spec = DESIGN_SPEC
-        set_key = shift_set_widget.value
-        attr = shift_attr_widget.value
-        if set_key is None or attr is None:
-            raise ValueError("Select a choice set and an attribute to change.")
+        set_key = sim_set_widget.value
+        if set_key is None:
+            raise ValueError("Select a reference lineup (choice set).")
 
         base = PRED_SOURCE_DF[PRED_SOURCE_DF["_group"].eq(set_key)].copy()
         if len(base) < 2:
-            raise ValueError("The selected choice set has fewer than two alternatives.")
+            raise ValueError("The selected lineup has fewer than two alternatives.")
         labels = alternative_labels(base, spec)
 
-        if attr in spec["categorical"]:
-            new_value = shift_level_widget.value
+        focal = base.iloc[[0]].copy()
+        for col, dd in SIM_ATTR_WIDGETS.items():
+            focal[col] = dd.value
+        profile_text = ", ".join(f"{col} = {dd.value}" for col, dd in SIM_ATTR_WIDGETS.items())
+
+        mode, target = sim_mode_widget.value
+        if mode == "add":
+            combined = pd.concat([base, focal], ignore_index=True)
+            after_labels = labels + ["Your product"]
+            focal_pos = len(labels)
         else:
-            new_value = float(shift_value_widget.value)
+            pos = labels.index(target)
+            combined = base.copy()
+            for col, dd in SIM_ATTR_WIDGETS.items():
+                combined.loc[combined.index[pos], col] = dd.value
+            after_labels = ["Your product" if i == pos else lab for i, lab in enumerate(labels)]
+            focal_pos = pos
 
-        target = shift_alt_widget.value
-        mask = [True] * len(base) if target == ALL_ALTS else [lab == target for lab in labels]
-        changed = base.copy()
-        changed.loc[changed.index[mask], attr] = new_value
+        u_before = predict_utilities(base, spec)
+        p_before = grouped_probabilities(u_before, base["_group"].to_numpy())
+        u_after = predict_utilities(combined, spec)
+        p_after = grouped_probabilities(u_after, combined["_group"].to_numpy())
 
-        p0 = predict_probabilities(base, spec)
-        p1 = predict_probabilities(changed, spec)
-
+        focal_u = float(u_after[focal_pos])
+        share_before = list(p_before) + [np.nan] if mode == "add" else list(p_before)
+        change_pp = [
+            round(100 * (p_after[i] - p_before[i]), 2) if i < len(p_before) else np.nan
+            for i in range(len(after_labels))
+        ]
         table = pd.DataFrame(
             {
-                "Alternative": labels,
-                "Baseline share": np.round(p0, 4),
-                "New share": np.round(p1, 4),
-                "Change (pp)": np.round(100 * (p1 - p0), 2),
+                "Option": after_labels,
+                "Utility": np.round(u_after, 4),
+                "Share before": np.round(share_before, 4),
+                "Share after": np.round(p_after, 4),
+                "Change (pp)": change_pp,
             }
         )
-        target_label = "all alternatives" if target == ALL_ALTS else target
-        with shift_out:
+
+        focal_share = float(p_after[focal_pos])
+        losses = [(after_labels[i], p_after[i] - p_before[i]) for i in range(len(p_before))]
+        loser, loss = min(losses, key=lambda t: t[1])
+        interpretation = (
+            f"Your product takes a **{100 * focal_share:.1f}%** share of this lineup. "
+            f"Biggest loser: **{loser}** ({100 * loss:+.1f} pp). "
+            "These shares are specific to this lineup; the same product would fare differently "
+            "against a different competitive set."
+        )
+
+        with sim_out:
             clear_output(wait=True)
-            display(Markdown(f"## Share shift: **{attr} → {new_value}** on **{target_label}**"))
-            display(
-                Markdown(
-                    "Share shifts depend on this baseline scenario (∂p/∂x = β·p(1−p)): "
-                    "the same change moves shares differently in other choice sets. "
-                    "The scenario-invariant counterpart is WTP in Tab 4."
-                )
-            )
+            display(Markdown(f"## Your product: {profile_text}"))
+            display(Markdown(f"**Net utility: {focal_u:.4f}** (higher = more attractive; compare across options)"))
+            display(Markdown(interpretation))
             display(html_table(table))
-            x = np.arange(len(labels))
+            x = np.arange(len(after_labels))
             width = 0.38
-            fig, ax = plt.subplots(figsize=(max(4.5, 1.4 * len(labels)), 3.2))
-            ax.bar(x - width / 2, p0, width, label="Baseline", color="#4C78A8")
-            ax.bar(x + width / 2, p1, width, label="After change", color="#F58518")
+            before_plot = [p_before[i] if i < len(p_before) else 0.0 for i in range(len(after_labels))]
+            fig, ax = plt.subplots(figsize=(max(4.5, 1.4 * len(after_labels)), 3.2))
+            ax.bar(x - width / 2, before_plot, width, label="Before entry", color="#4C78A8")
+            ax.bar(x + width / 2, p_after, width, label="After entry", color="#F58518")
             ax.set_xticks(x)
-            ax.set_xticklabels(labels)
+            ax.set_xticklabels(after_labels)
             ax.set_ylim(0, 1)
             ax.set_ylabel("Predicted share")
-            ax.set_title(f"Choice set: {set_key}")
+            ax.set_title(f"Lineup: {set_key}")
             ax.legend()
             plt.tight_layout()
             plt.show()
-        tabs.selected_index = 6
+        tabs.selected_index = 7
     except Exception as exc:
-        with shift_out:
+        with sim_out:
             clear_output(wait=True)
-            display(Markdown(f"**Share-shift error:** {exc}"))
+            display(Markdown(f"**Simulator error:** {exc}"))
 
 
 def fit_cbc_model(_):
@@ -928,6 +965,7 @@ def fit_cbc_model(_):
         price_widget.options = [NONE] + numeric_xs
         price_widget.value = NONE
         wtp_out.clear_output()
+        sim_out.clear_output()
 
         render_summary(df, spec)
         render_results(result, df["_group"], X.shape[1])
@@ -964,9 +1002,8 @@ asc_widget.observe(refresh_formula_preview, names="value")
 summary_button.on_click(on_view_summary)
 fit_button.on_click(fit_cbc_model)
 wtp_button.on_click(compute_wtp)
-shift_set_widget.observe(refresh_shift_alt_options, names="value")
-shift_attr_widget.observe(refresh_shift_value_control, names="value")
-shift_button.on_click(compute_share_shift)
+sim_set_widget.observe(refresh_sim_mode_options, names="value")
+sim_button.on_click(compute_profile_sim)
 
 case_text = """
 **Required long format:** one row per alternative. Required columns are respondent ID,
@@ -974,7 +1011,7 @@ task/choice-set ID, a 0/1 chosen indicator, and one or more attribute columns.
 Every respondent-task choice set must contain at least two alternatives and exactly one chosen row.
 Column names are selected after upload, so any CSV following this structure can be used.
 An optional prediction-data CSV (same respondent, task, and attribute columns; no chosen
-indicator needed) drives the Predictions and Share Shift tabs.
+indicator needed) drives the Predictions and Profile Simulator tabs.
 """
 
 tab0 = widgets.VBox(
@@ -1011,34 +1048,40 @@ tab2 = widgets.VBox(
         setup_status_out,
     ]
 )
-tab3 = widgets.VBox(
+tab3 = widgets.VBox([logit_out])
+tab4 = widgets.VBox([insights_out])
+tab5 = widgets.VBox(
     [
-        logit_out,
-        widgets.HTML("<hr><h3>Willingness to pay</h3>"),
-        widgets.HTML("<small>Select the price variable, then click Calculate WTP. The WTP table opens in Tab 4.</small>"),
+        widgets.HTML("<h2>5. Willingness to Pay (WTP)</h2>"),
+        widgets.HTML(
+            "<small>WTP = −β / β_price: the money amount that exactly compensates a one-unit "
+            "(numeric) or one-level (categorical) change in that attribute, holding utility constant. "
+            "It lives in utility space, so it does not depend on any particular competitive lineup. "
+            "Requires price to enter the model as a numeric attribute.</small>"
+        ),
         price_widget,
         wtp_button,
+        wtp_out,
     ]
 )
-tab4 = widgets.VBox([insights_out, wtp_out])
-tab6 = widgets.VBox(
+tab7 = widgets.VBox(
     [
-        widgets.HTML("<h2>6. Share Shift (probability space)</h2>"),
+        widgets.HTML("<h2>7. Profile Simulator</h2>"),
         widgets.HTML(
-            "<small>Pick a choice set from the prediction data, change one attribute on one or all "
-            "alternatives, and compare predicted shares before vs after. Unlike WTP (Tab 4), which is "
-            "scenario-invariant, share shifts are specific to the baseline scenario.</small>"
+            "<small>Pick a reference lineup, build your product by choosing one level per attribute, "
+            "and simulate its entry — either added as a new option or replacing an existing one. "
+            "You get your product's net utility and the lineup's predicted shares before vs after entry. "
+            "Shares are specific to this lineup, unlike WTP (Tab 5), which is lineup-invariant.</small>"
         ),
-        shift_set_widget,
-        shift_attr_widget,
-        shift_alt_widget,
-        shift_level_widget,
-        shift_value_widget,
-        shift_button,
-        shift_out,
+        sim_set_widget,
+        sim_mode_widget,
+        widgets.HTML("<b>Build your product:</b>"),
+        sim_profile_box,
+        sim_button,
+        sim_out,
     ]
 )
-tabs = widgets.Tab(children=[tab0, tab1, tab2, tab3, tab4, prediction_out, tab6])
+tabs = widgets.Tab(children=[tab0, tab1, tab2, tab3, tab4, tab5, prediction_out, tab7])
 for index, title in enumerate(
     [
         "0. Case & Data",
@@ -1046,8 +1089,9 @@ for index, title in enumerate(
         "2. Choice Summary",
         "3. CBC Logit",
         "4. Attribute Insights",
-        "5. Predictions",
-        "6. Share Shift",
+        "5. WTP",
+        "6. Predictions",
+        "7. Profile Simulator",
     ]
 ):
     tabs.set_title(index, title)
