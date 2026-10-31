@@ -234,6 +234,32 @@ def drop_collinear_columns(X):
     return X[kept].copy(), dropped
 
 
+class ScaledResult:
+    """ConditionalLogit result rescaled from standardized back to original units.
+
+    Numeric attributes are z-standardized before fitting for numerical
+    stability. Coefficients, standard errors and confidence intervals are
+    divided by the attribute standard deviation, so all reported values are
+    in original units (e.g., per rupee, per mAh). z, p and log-likelihood
+    are invariant to this linear rescaling.
+    """
+
+    def __init__(self, result, scales):
+        self.llf = result.llf
+        s = pd.Series(1.0, index=result.params.index)
+        for col, value in scales.items():
+            if col in s.index:
+                s[col] = value
+        self.params = result.params / s
+        self.bse = result.bse / s
+        self.tvalues = self.params / self.bse
+        self.pvalues = result.pvalues
+        self._ci = result.conf_int(alpha=0.05).div(s, axis=0)
+
+    def conf_int(self, alpha=0.05):
+        return self._ci
+
+
 def prepare_scenario_data(spec):
     if SCENARIO_DATA is None:
         return None
@@ -645,11 +671,28 @@ def fit_cbc_model(_):
         X, DROPPED_TERMS = drop_collinear_columns(X_full)
         spec["model_columns"] = list(X.columns)
 
-        result = ConditionalLogit(
+        # Z-standardize numeric attributes for numerical stability; the raw
+        # optimizer can stall at the zero vector when attributes are on large
+        # scales (e.g., price in rupees). Estimates are rescaled afterwards.
+        numeric_cols = [c for c in spec["xs"] if c not in spec["categorical"] and c in X.columns]
+        scales = X[numeric_cols].std(ddof=0).replace(0, 1.0) if numeric_cols else pd.Series(dtype=float)
+        X_fit = X.copy()
+        if numeric_cols:
+            X_fit[numeric_cols] = (X_fit[numeric_cols] - X_fit[numeric_cols].mean()) / scales
+
+        raw_result = ConditionalLogit(
             endog=df["_chosen"].to_numpy(dtype=float),
-            exog=X,
+            exog=X_fit,
             groups=df["_group"].to_numpy(),
-        ).fit(disp=False, maxiter=500)
+        ).fit(disp=False, method="bfgs", maxiter=2000)
+        result = ScaledResult(raw_result, scales)
+
+        if not np.isfinite(result.params).all() or np.allclose(result.params.to_numpy(dtype=float), 0):
+            raise ValueError(
+                "Optimization returned an all-zero solution, which is a numerical failure, "
+                "not a model result. Check that chosen is 0/1, every choice set has exactly "
+                "one chosen alternative, and attributes vary within choice sets."
+            )
 
         MODEL_RESULT = result
         DESIGN_SPEC = spec
