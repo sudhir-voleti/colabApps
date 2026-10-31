@@ -1,5 +1,5 @@
 # logit_cbc.py
-# Generic Colab/ip ywidgets conditional-logit app for choice-based conjoint data.
+# Generic Colab/ipywidgets conditional-logit app for choice-based conjoint data.
 # Expected input: long-format CSV, one row per alternative, one choice per respondent-task.
 
 import io
@@ -21,7 +21,9 @@ MODEL_RESULT = None
 DESIGN_SPEC = None
 TRAIN_X = None
 PREDICTION_OUTPUT = None
+PRED_SOURCE_DF = None
 DROPPED_TERMS = []
+ALL_ALTS = "(all alternatives)"
 
 
 def uploaded_content(upload_widget):
@@ -268,14 +270,14 @@ def prepare_scenario_data(spec):
         required.append(spec["alternative"])
     missing = [c for c in required if c not in SCENARIO_DATA.columns]
     if missing:
-        raise ValueError(f"Scenario CSV is missing selected columns: {missing}")
+        raise ValueError(f"Prediction-data CSV is missing selected columns: {missing}")
     df = SCENARIO_DATA[required].copy()
     if df.isna().any().any():
         bad = df.columns[df.isna().any()].tolist()
-        raise ValueError(f"Selected scenario columns contain missing values: {bad}")
+        raise ValueError(f"Selected prediction-data columns contain missing values: {bad}")
     df["_group"] = make_group_key(df, spec["respondent"], spec["task"])
     if df["_group"].nunique() == 0:
-        raise ValueError("The scenario CSV has no choice sets.")
+        raise ValueError("The prediction-data CSV has no choice sets.")
     return df
 
 
@@ -417,7 +419,7 @@ def partworth_table(df, X, result, spec):
 
 # Widgets
 train_upload = widgets.FileUpload(accept=".csv", multiple=False, description="CBC training CSV")
-scenario_upload = widgets.FileUpload(accept=".csv", multiple=False, description="Scenario CSV (optional)")
+scenario_upload = widgets.FileUpload(accept=".csv", multiple=False, description="Prediction data CSV (optional)")
 
 respondent_widget = widgets.Dropdown(description="Respondent ID", style={"description_width": "initial"})
 task_widget = widgets.Dropdown(description="Task / choice set", style={"description_width": "initial"})
@@ -441,14 +443,34 @@ asc_widget = widgets.Checkbox(
     indent=False,
     style={"description_width": "initial"},
 )
+summary_button = widgets.Button(description="View summary", button_style="info", icon="table")
 fit_button = widgets.Button(description="Fit CBC logit", button_style="success", icon="play")
+price_widget = widgets.Dropdown(
+    description="Price variable (for WTP)",
+    options=[NONE],
+    value=NONE,
+    style={"description_width": "initial"},
+)
+wtp_button = widgets.Button(description="Calculate WTP", button_style="warning", icon="calculator")
 formula_html = widgets.HTML("Select variables to preview the choice model.")
+
+shift_set_widget = widgets.Dropdown(
+    description="Choice set", style={"description_width": "initial"}, layout=widgets.Layout(width="95%")
+)
+shift_attr_widget = widgets.Dropdown(description="Attribute to change", style={"description_width": "initial"})
+shift_alt_widget = widgets.Dropdown(description="Apply change to", style={"description_width": "initial"})
+shift_level_widget = widgets.Dropdown(description="New level", style={"description_width": "initial"})
+shift_value_widget = widgets.FloatText(description="New value", style={"description_width": "initial"})
+shift_button = widgets.Button(description="Compare shares", button_style="info", icon="exchange")
+shift_out = widgets.Output()
 
 data_preview_out = widgets.Output()
 setup_status_out = widgets.Output()
+summary_status_out = widgets.Output()
 summary_out = widgets.Output()
 logit_out = widgets.Output()
 insights_out = widgets.Output()
+wtp_out = widgets.Output()
 prediction_out = widgets.Output()
 
 
@@ -501,13 +523,13 @@ def preview_data():
     with data_preview_out:
         clear_output(wait=True)
         if DATA is None and SCENARIO_DATA is None:
-            display(Markdown("Upload CBC training data. Scenario data is optional."))
+            display(Markdown("Upload CBC training data. Prediction data is optional."))
             return
         if DATA is not None:
             display(Markdown(f"### CBC training preview — {DATA.shape[0]:,} rows × {DATA.shape[1]:,} columns"))
             display(DATA.head(10))
         if SCENARIO_DATA is not None:
-            display(Markdown(f"### Scenario preview — {SCENARIO_DATA.shape[0]:,} rows × {SCENARIO_DATA.shape[1]:,} columns"))
+            display(Markdown(f"### Prediction data preview — {SCENARIO_DATA.shape[0]:,} rows × {SCENARIO_DATA.shape[1]:,} columns"))
             display(SCENARIO_DATA.head(10))
 
 
@@ -536,12 +558,12 @@ def on_train_upload(change):
 def on_scenario_upload(change):
     global SCENARIO_DATA
     try:
-        SCENARIO_DATA = read_upload(scenario_upload, "scenario")
+        SCENARIO_DATA = read_upload(scenario_upload, "prediction data")
         preview_data()
     except Exception as exc:
         with data_preview_out:
             clear_output(wait=True)
-            display(Markdown(f"**Scenario-file error:** {exc}"))
+            display(Markdown(f"**Prediction-file error:** {exc}"))
 
 
 def numeric_summary(df, xs, categorical):
@@ -640,7 +662,7 @@ def render_insights(df, X, result, spec):
 
 
 def render_predictions(train_df, train_X, result, spec):
-    global PREDICTION_OUTPUT
+    global PREDICTION_OUTPUT, PRED_SOURCE_DF
     scenario_df = prepare_scenario_data(spec)
     if scenario_df is None:
         source = train_df
@@ -651,16 +673,219 @@ def render_predictions(train_df, train_X, result, spec):
         source = scenario_df
         X = build_design(scenario_df, spec, training=False)
         X = X.reindex(columns=spec["model_columns"], fill_value=0.0)
-        title = "Scenario choice probabilities"
+        title = "Prediction-data choice probabilities"
         include_choice = spec["choice"] in scenario_df.columns
 
+    PRED_SOURCE_DF = source
+    refresh_shift_options()
     PREDICTION_OUTPUT = build_prediction_output(source, X, result, spec, include_choice)
     with prediction_out:
         clear_output(wait=True)
         display(Markdown(f"## {title}"))
         display(Markdown("Probabilities sum to 1 within each respondent-task choice set."))
         display(PREDICTION_OUTPUT.head(20))
+        plot_choice_shares(PREDICTION_OUTPUT)
         display(download_button(PREDICTION_OUTPUT, "cbc_choice_probabilities.csv", "Download prediction CSV"))
+
+
+def on_view_summary(_):
+    """Render descriptive statistics for the selected variables, no model fit."""
+    try:
+        df, spec = prepare_training_data()
+        render_summary(df, spec)
+        with summary_status_out:
+            clear_output(wait=True)
+            display(
+                Markdown(
+                    f"**Summary ready.** Choice sets: **{df['_group'].nunique():,}**; "
+                    f"rows: **{len(df):,}**. Review Tab 2, then click **Fit CBC logit** there."
+                )
+            )
+        tabs.selected_index = 2
+    except Exception as exc:
+        with summary_status_out:
+            clear_output(wait=True)
+            display(Markdown(f"**Summary error:** {exc}"))
+
+
+def compute_wtp(_):
+    """WTP for each term = -beta / beta_price, in money units of the price variable."""
+    try:
+        if MODEL_RESULT is None or DESIGN_SPEC is None:
+            raise ValueError("Fit the CBC logit model first (Tab 2).")
+        price = price_widget.value
+        if price == NONE:
+            raise ValueError("Select the price variable in the dropdown above.")
+        if price not in MODEL_RESULT.params.index:
+            raise ValueError(f"'{price}' has no estimated coefficient in this model.")
+        beta_price = MODEL_RESULT.params[price]
+        if beta_price == 0 or not np.isfinite(beta_price):
+            raise ValueError("Price coefficient is zero or non-finite; WTP is undefined.")
+
+        rows = []
+        for term, coef in MODEL_RESULT.params.items():
+            if term == price:
+                continue
+            rows.append(
+                {
+                    "Term": term,
+                    "Coefficient": coef,
+                    "WTP (money)": -coef / beta_price,
+                }
+            )
+        wtp = pd.DataFrame(rows).round(4)
+        with wtp_out:
+            clear_output(wait=True)
+            display(Markdown(f"## Willingness to pay (WTP = −β / β_price; β_price = {beta_price:.3g})"))
+            display(Markdown("Positive WTP = money value of that level/unit versus its baseline."))
+            display(html_table(wtp))
+        tabs.selected_index = 4
+    except Exception as exc:
+        with wtp_out:
+            clear_output(wait=True)
+            display(Markdown(f"**WTP error:** {exc}"))
+
+
+def plot_choice_shares(out, max_sets=8):
+    """Small-multiple bar charts of predicted shares, one panel per choice set."""
+    grouped = list(out.groupby(["Respondent", "Task"], sort=False))[:max_sets]
+    n = len(grouped)
+    if n == 0:
+        return
+    fig, axes = plt.subplots(1, n, figsize=(2.6 * n, 3.0), sharey=True)
+    for ax, ((resp, task), sub) in zip(np.atleast_1d(axes), grouped):
+        ax.bar(sub["Alternative"].astype(str), sub["Choice probability"], color="#4C78A8")
+        ax.set_title(f"R{resp} · T{task}", fontsize=9)
+        ax.set_ylim(0, 1)
+        ax.tick_params(axis="x", labelsize=8)
+    np.atleast_1d(axes)[0].set_ylabel("Predicted share")
+    fig.suptitle("Predicted choice shares by choice set", y=1.03)
+    plt.tight_layout()
+    plt.show()
+
+
+def predict_probabilities(df, spec):
+    """Grouped softmax probabilities for a prediction/training dataframe."""
+    X = build_design(df, spec, training=False)
+    X = X.reindex(columns=spec["model_columns"], fill_value=0.0)
+    utilities = X.to_numpy(dtype=float) @ MODEL_RESULT.params.to_numpy(dtype=float)
+    return grouped_probabilities(utilities, df["_group"].to_numpy())
+
+
+def alternative_labels(sub, spec):
+    if spec["alternative"] != NONE:
+        return [str(v) for v in sub[spec["alternative"]].tolist()]
+    return [str(i + 1) for i in range(len(sub))]
+
+
+def refresh_shift_options():
+    """Populate the Share Shift controls after a model fit/prediction run."""
+    if PRED_SOURCE_DF is None or DESIGN_SPEC is None:
+        return
+    sets = PRED_SOURCE_DF["_group"].drop_duplicates().tolist()
+    shift_set_widget.options = sets
+    if sets:
+        shift_set_widget.value = sets[0]
+    shift_attr_widget.options = list(DESIGN_SPEC["xs"])
+    refresh_shift_alt_options()
+    refresh_shift_value_control()
+
+
+def refresh_shift_alt_options(change=None):
+    if PRED_SOURCE_DF is None or DESIGN_SPEC is None or shift_set_widget.value is None:
+        return
+    sub = PRED_SOURCE_DF[PRED_SOURCE_DF["_group"].eq(shift_set_widget.value)]
+    labels = alternative_labels(sub, DESIGN_SPEC)
+    shift_alt_widget.options = labels + [ALL_ALTS]
+    shift_alt_widget.value = labels[0] if labels else ALL_ALTS
+
+
+def refresh_shift_value_control(change=None):
+    """Show a level dropdown for categorical attributes, a value box for numeric."""
+    if DESIGN_SPEC is None or shift_attr_widget.value is None:
+        return
+    attr = shift_attr_widget.value
+    if attr in DESIGN_SPEC["categorical"]:
+        shift_level_widget.options = list(DESIGN_SPEC["levels"][attr])
+        shift_level_widget.layout.display = ""
+        shift_value_widget.layout.display = "none"
+    else:
+        shift_level_widget.layout.display = "none"
+        shift_value_widget.layout.display = ""
+        if PRED_SOURCE_DF is not None and attr in PRED_SOURCE_DF.columns:
+            shift_value_widget.value = float(pd.to_numeric(PRED_SOURCE_DF[attr]).mean())
+
+
+def compute_share_shift(_):
+    """Probability-space companion: change one attribute in one choice set and
+    compare predicted shares before vs after. Share shifts are scenario-specific."""
+    try:
+        if MODEL_RESULT is None or DESIGN_SPEC is None:
+            raise ValueError("Fit the CBC logit model first (Tab 2).")
+        if PRED_SOURCE_DF is None:
+            raise ValueError("No prediction data available.")
+        spec = DESIGN_SPEC
+        set_key = shift_set_widget.value
+        attr = shift_attr_widget.value
+        if set_key is None or attr is None:
+            raise ValueError("Select a choice set and an attribute to change.")
+
+        base = PRED_SOURCE_DF[PRED_SOURCE_DF["_group"].eq(set_key)].copy()
+        if len(base) < 2:
+            raise ValueError("The selected choice set has fewer than two alternatives.")
+        labels = alternative_labels(base, spec)
+
+        if attr in spec["categorical"]:
+            new_value = shift_level_widget.value
+        else:
+            new_value = float(shift_value_widget.value)
+
+        target = shift_alt_widget.value
+        mask = [True] * len(base) if target == ALL_ALTS else [lab == target for lab in labels]
+        changed = base.copy()
+        changed.loc[changed.index[mask], attr] = new_value
+
+        p0 = predict_probabilities(base, spec)
+        p1 = predict_probabilities(changed, spec)
+
+        table = pd.DataFrame(
+            {
+                "Alternative": labels,
+                "Baseline share": np.round(p0, 4),
+                "New share": np.round(p1, 4),
+                "Change (pp)": np.round(100 * (p1 - p0), 2),
+            }
+        )
+        target_label = "all alternatives" if target == ALL_ALTS else target
+        with shift_out:
+            clear_output(wait=True)
+            display(Markdown(f"## Share shift: **{attr} → {new_value}** on **{target_label}**"))
+            display(
+                Markdown(
+                    "Share shifts depend on this baseline scenario (∂p/∂x = β·p(1−p)): "
+                    "the same change moves shares differently in other choice sets. "
+                    "The scenario-invariant counterpart is WTP in Tab 4."
+                )
+            )
+            display(html_table(table))
+            x = np.arange(len(labels))
+            width = 0.38
+            fig, ax = plt.subplots(figsize=(max(4.5, 1.4 * len(labels)), 3.2))
+            ax.bar(x - width / 2, p0, width, label="Baseline", color="#4C78A8")
+            ax.bar(x + width / 2, p1, width, label="After change", color="#F58518")
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels)
+            ax.set_ylim(0, 1)
+            ax.set_ylabel("Predicted share")
+            ax.set_title(f"Choice set: {set_key}")
+            ax.legend()
+            plt.tight_layout()
+            plt.show()
+        tabs.selected_index = 6
+    except Exception as exc:
+        with shift_out:
+            clear_output(wait=True)
+            display(Markdown(f"**Share-shift error:** {exc}"))
 
 
 def fit_cbc_model(_):
@@ -698,6 +923,12 @@ def fit_cbc_model(_):
         DESIGN_SPEC = spec
         TRAIN_X = X
 
+        # Refresh the WTP price dropdown with the fitted numeric attributes.
+        numeric_xs = [c for c in spec["xs"] if c not in spec["categorical"] and c in result.params.index]
+        price_widget.options = [NONE] + numeric_xs
+        price_widget.value = NONE
+        wtp_out.clear_output()
+
         render_summary(df, spec)
         render_results(result, df["_group"], X.shape[1])
         render_insights(df, X, result, spec)
@@ -730,13 +961,20 @@ x_widget.observe(refresh_factor_options, names="value")
 factor_widget.observe(lambda change: refresh_formula_preview(), names="value")
 baseline_widget.observe(refresh_formula_preview, names="value")
 asc_widget.observe(refresh_formula_preview, names="value")
+summary_button.on_click(on_view_summary)
 fit_button.on_click(fit_cbc_model)
+wtp_button.on_click(compute_wtp)
+shift_set_widget.observe(refresh_shift_alt_options, names="value")
+shift_attr_widget.observe(refresh_shift_value_control, names="value")
+shift_button.on_click(compute_share_shift)
 
 case_text = """
 **Required long format:** one row per alternative. Required columns are respondent ID,
 task/choice-set ID, a 0/1 chosen indicator, and one or more attribute columns.
 Every respondent-task choice set must contain at least two alternatives and exactly one chosen row.
 Column names are selected after upload, so any CSV following this structure can be used.
+An optional prediction-data CSV (same respondent, task, and attribute columns; no chosen
+indicator needed) drives the Predictions and Share Shift tabs.
 """
 
 tab0 = widgets.VBox(
@@ -745,7 +983,7 @@ tab0 = widgets.VBox(
         widgets.HTML(case_text),
         train_upload,
         scenario_upload,
-        widgets.HTML("<small>The scenario CSV is optional. It uses the same respondent, task, alternative, and attribute columns.</small>"),
+        widgets.HTML("<small>The prediction-data CSV is optional. It uses the same respondent, task, alternative, and attribute columns.</small>"),
         data_preview_out,
     ]
 )
@@ -761,13 +999,56 @@ tab1 = widgets.VBox(
         baseline_widget,
         asc_widget,
         formula_html,
+        summary_button,
+        summary_status_out,
+    ]
+)
+tab2 = widgets.VBox(
+    [
+        widgets.HTML("<h2>2. Choice Summary</h2>"),
+        summary_out,
         fit_button,
         setup_status_out,
     ]
 )
-tabs = widgets.Tab(children=[tab0, tab1, summary_out, logit_out, insights_out, prediction_out])
+tab3 = widgets.VBox(
+    [
+        logit_out,
+        widgets.HTML("<hr><h3>Willingness to pay</h3>"),
+        widgets.HTML("<small>Select the price variable, then click Calculate WTP. The WTP table opens in Tab 4.</small>"),
+        price_widget,
+        wtp_button,
+    ]
+)
+tab4 = widgets.VBox([insights_out, wtp_out])
+tab6 = widgets.VBox(
+    [
+        widgets.HTML("<h2>6. Share Shift (probability space)</h2>"),
+        widgets.HTML(
+            "<small>Pick a choice set from the prediction data, change one attribute on one or all "
+            "alternatives, and compare predicted shares before vs after. Unlike WTP (Tab 4), which is "
+            "scenario-invariant, share shifts are specific to the baseline scenario.</small>"
+        ),
+        shift_set_widget,
+        shift_attr_widget,
+        shift_alt_widget,
+        shift_level_widget,
+        shift_value_widget,
+        shift_button,
+        shift_out,
+    ]
+)
+tabs = widgets.Tab(children=[tab0, tab1, tab2, tab3, tab4, prediction_out, tab6])
 for index, title in enumerate(
-    ["0. Case & Data", "1. Choice Setup", "2. Choice Summary", "3. CBC Logit", "4. Attribute Insights", "5. Predictions"]
+    [
+        "0. Case & Data",
+        "1. Choice Setup",
+        "2. Choice Summary",
+        "3. CBC Logit",
+        "4. Attribute Insights",
+        "5. Predictions",
+        "6. Share Shift",
+    ]
 ):
     tabs.set_title(index, title)
 
