@@ -25,6 +25,10 @@ def run_generic_ab_app():
         'is_binary': False
     }
 
+    # Helper for horizontal line dividers
+    def make_hr():
+        return widgets.HTML('<hr style="margin: 10px 0; border: 0; border-top: 1px solid #ccc;">')
+
     # =========================================================
     # TAB 1: DATA UPLOAD & PREVIEW
     # =========================================================
@@ -62,7 +66,7 @@ def run_generic_ab_app():
     tab1_layout = widgets.VBox([
         widgets.HTML("<h4>Step 1: Upload Dataset</h4>"),
         upload_w,
-        widgets.Divider(),
+        make_hr(),
         out_tab1
     ])
 
@@ -163,7 +167,7 @@ def run_generic_ab_app():
         widgets.HBox([y_dropdown, x_dropdown]),
         widgets.HBox([val_a_dropdown, val_b_dropdown]),
         widgets.HBox([seg_dropdown, lock_btn]),
-        widgets.Divider(),
+        make_hr(),
         out_tab2
     ])
 
@@ -296,7 +300,7 @@ def run_generic_ab_app():
     tab3_layout = widgets.VBox([
         widgets.HTML("<h4>Step 3: Execute Statistical Model & Inspect Visuals</h4>"),
         run_test_btn,
-        widgets.Divider(),
+        make_hr(),
         out_tab3
     ])
 
