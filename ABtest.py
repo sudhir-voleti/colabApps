@@ -12,7 +12,7 @@ from IPython.display import display, HTML
 sns.set_theme(style="whitegrid")
 
 def run_generic_ab_app():
-    """Renders the redesigned, 3-tab generic A/B Testing & Hypothesis Engine for Google Colab."""
+    """Renders the redesigned, 3-tab generic A/B Testing & Hypothesis Engine for Google Colab with un-truncated labels."""
     
     # State dictionary to persist dataset and configuration across tabs
     state = {
@@ -29,6 +29,10 @@ def run_generic_ab_app():
     def make_hr():
         return widgets.HTML('<hr style="margin: 10px 0; border: 0; border-top: 1px solid #ccc;">')
 
+    # Common styling objects for clean layout without label clipping
+    style_opts = {'description_width': 'initial'}
+    widget_layout = widgets.Layout(width='340px')
+
     # =========================================================
     # TAB 1: DATA UPLOAD & PREVIEW
     # =========================================================
@@ -41,7 +45,6 @@ def run_generic_ab_app():
         
         with out_tab1:
             out_tab1.clear_output()
-            # Handle ipywidgets file upload schema across versions
             uploaded_file = list(upload_w.value.values())[0] if isinstance(upload_w.value, dict) else upload_w.value[0]
             content = uploaded_file['content'] if isinstance(uploaded_file, dict) else uploaded_file.content
             
@@ -49,7 +52,6 @@ def run_generic_ab_app():
                 state['df'] = pd.read_csv(io.BytesIO(content))
                 df = state['df']
                 
-                # Update dropdown options in Tab 2
                 cols = list(df.columns)
                 y_dropdown.options = cols
                 x_dropdown.options = cols
@@ -73,13 +75,18 @@ def run_generic_ab_app():
     # =========================================================
     # TAB 2: VARIABLE SELECTION & DESCRIPTIVE STATS
     # =========================================================
-    y_dropdown = widgets.Dropdown(description='Outcome (Y):')
-    x_dropdown = widgets.Dropdown(description='Grouping (X):')
-    val_a_dropdown = widgets.Dropdown(description='Group A (Ref):')
-    val_b_dropdown = widgets.Dropdown(description='Group B (Comp):')
-    seg_dropdown = widgets.Dropdown(description='Segment (Opt):')
+    y_dropdown = widgets.Dropdown(description='Outcome Metric (Y):', style=style_opts, layout=widget_layout)
+    x_dropdown = widgets.Dropdown(description='Grouping Factor (X):', style=style_opts, layout=widget_layout)
+    val_a_dropdown = widgets.Dropdown(description='Group A (Ref):', style=style_opts, layout=widget_layout)
+    val_b_dropdown = widgets.Dropdown(description='Group B (Comp):', style=style_opts, layout=widget_layout)
+    seg_dropdown = widgets.Dropdown(description='Segment (Optional):', style=style_opts, layout=widget_layout)
     
-    lock_btn = widgets.Button(description='Lock Selection & Compute Summary', button_style='primary', icon='lock')
+    lock_btn = widgets.Button(
+        description='Lock Selection & Compute Summary', 
+        button_style='primary', 
+        icon='lock',
+        layout=widgets.Layout(width='auto', min_width='280px')
+    )
     out_tab2 = widgets.Output()
 
     def on_x_change(change):
@@ -123,7 +130,6 @@ def run_generic_ab_app():
             y_series = df[y_col].dropna()
             unique_y = y_series.unique()
             
-            # Auto-clean binary strings to 0 and 1 if applicable
             if len(unique_y) == 2 and set(unique_y).issubset({0, 1, '0', '1', 'Yes', 'No', 'yes', 'no', 'TRUE', 'FALSE', 'true', 'false'}):
                 state['is_binary'] = True
                 mapping = {1:1, 0:0, '1':1, '0':0, 'Yes':1, 'No':0, 'yes':1, 'no':0, 'TRUE':1, 'FALSE':0, 'true':1, 'false':0}
@@ -131,7 +137,6 @@ def run_generic_ab_app():
             else:
                 state['is_binary'] = pd.api.types.is_numeric_dtype(y_series) and len(unique_y) == 2
             
-            # Filter dataset for Group A and Group B only
             subset = df[df[x_col].isin([val_a, val_b])].copy()
             
             print("Selection Locked Successfully!\n")
@@ -148,7 +153,6 @@ def run_generic_ab_app():
             desc['Std_Dev'] = desc['Std_Dev'].round(4)
             display(desc)
             
-            # Segment descriptive stats if selected
             if state['seg_col']:
                 print(f"\n=== DESCRIPTIVE STATISTICS STRATIFIED BY SEGMENT ({state['seg_col']}) ===")
                 seg_desc = subset.groupby([state['seg_col'], x_col])[y_col].agg(
@@ -164,9 +168,11 @@ def run_generic_ab_app():
     
     tab2_layout = widgets.VBox([
         widgets.HTML("<h4>Step 2: Map Variables & Confirm Selection</h4>"),
-        widgets.HBox([y_dropdown, x_dropdown]),
-        widgets.HBox([val_a_dropdown, val_b_dropdown]),
-        widgets.HBox([seg_dropdown, lock_btn]),
+        widgets.VBox([
+            widgets.HBox([y_dropdown, x_dropdown]),
+            widgets.HBox([val_a_dropdown, val_b_dropdown]),
+            widgets.HBox([seg_dropdown, lock_btn])
+        ], layout=widgets.Layout(grid_gap='10px')),
         make_hr(),
         out_tab2
     ])
@@ -174,7 +180,12 @@ def run_generic_ab_app():
     # =========================================================
     # TAB 3: MODEL RESULTS & VISUALIZATION
     # =========================================================
-    run_test_btn = widgets.Button(description='Run Model Analysis', button_style='success', icon='chart-bar')
+    run_test_btn = widgets.Button(
+        description='Run Statistical Model Analysis', 
+        button_style='success', 
+        icon='chart-bar',
+        layout=widgets.Layout(width='auto', min_width='280px')
+    )
     out_tab3 = widgets.Output()
 
     def on_run_test_clicked(b):
@@ -191,7 +202,6 @@ def run_generic_ab_app():
                 print("Please complete and lock variable selections in Tab 2 first.")
                 return
             
-            # Filter data
             data_a = df[df[x_col] == val_a][y_col].dropna()
             data_b = df[df[x_col] == val_b][y_col].dropna()
             
@@ -201,7 +211,6 @@ def run_generic_ab_app():
             diff = meanB - meanA
             pct_lift = (diff / meanA * 100) if meanA != 0 else np.nan
             
-            # Perform appropriate test (Z-test for Proportions vs t-test for Means)
             if state['is_binary']:
                 test_type = "Two-Sample Proportion Z-Test"
                 count = [data_b.sum(), data_a.sum()]
@@ -236,7 +245,6 @@ def run_generic_ab_app():
             """
             display(HTML(html_verdict))
             
-            # Segment interaction analysis if segment variable was specified
             if seg_col:
                 print(f"=== SEGMENTED BREAKDOWN ACROSS '{seg_col}' ===")
                 seg_results = []
@@ -268,7 +276,6 @@ def run_generic_ab_app():
                 seg_res_df = pd.DataFrame(seg_results)
                 display(seg_res_df)
 
-            # Chart Visualization
             print("\n=== METRIC COMPARISON CHART ===")
             fig, ax = plt.subplots(figsize=(8, 4.5))
             subset_plot = df[df[x_col].isin([val_a, val_b])].copy()
@@ -304,7 +311,6 @@ def run_generic_ab_app():
         out_tab3
     ])
 
-    # Build Master Tab UI
     tabs = widgets.Tab(children=[tab1_layout, tab2_layout, tab3_layout])
     tabs.set_title(0, '1. Data & Preview')
     tabs.set_title(1, '2. Variables & Descriptives')
@@ -313,5 +319,4 @@ def run_generic_ab_app():
     display(HTML("<h3>Generic Hypothesis & A/B Testing Engine</h3>"))
     display(tabs)
 
-# Trigger app when executed directly via exec()
 run_generic_ab_app()
