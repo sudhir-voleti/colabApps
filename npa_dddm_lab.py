@@ -1,30 +1,23 @@
-# npa_dddm_lab.py
-# SVPNPA 28th MCTP Phase III — Data Driven Decision Making Lab (Outage-Proof ipywidgets + visNetwork Tree)
+# npa_drishti_dtree.py
+# SVPNPA 28th MCTP Phase III — Caselet 1: Project Drishti (Decision Tree & Command Triage)
 # Faculty: Prof. Sudhir Voleti | ISB Executive Education
-# Launch via:
+# Colab Launcher:
 #   import requests
-#   url = "https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/npa_dddm_lab.py"
+#   url = "https://raw.githubusercontent.com/sudhir-voleti/colabApps/main/npa_drishti_dtree.py"
 #   response = requests.get(url); response.raise_for_status()
 #   exec(compile(response.text, url, "exec"), globals())
 
 import io
 import json
-import base64
 import html as html_lib
 import numpy as np
 import pandas as pd
 from sklearn.tree import DecisionTreeClassifier, export_text
-from PIL import Image, ImageDraw
-import requests
 import ipywidgets as widgets
 from IPython.display import display, HTML, clear_output
 
-# Global state container for uploaded DataFrame
 APP_STATE = {"df": None, "filename": None}
 
-# ==============================================================================
-# HELPER FUNCTIONS: STYLING, VISNETWORK TREE BUILDER & LEAF EXTRACTION
-# ==============================================================================
 TABLE_CSS = """
 <style>
     .sv-table { border-collapse: collapse; width: 100%; font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; margin: 10px 0; }
@@ -40,15 +33,10 @@ def df_to_styled_html(df, max_rows=None):
     sub = df.head(max_rows) if max_rows else df
     return TABLE_CSS + sub.to_html(index=False, classes="sv-table", escape=False)
 
-def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
-    """
-    Generates an interactive Vis.js (visNetwork / visTree style) decision tree
-    with explicit top-down coordinates (zero overlap) and full 2D free-form node dragging.
-    """
+def build_visnetwork_tree_html(clf, feature_names, cat_cols):
     tree = clf.tree_
     total_samples = int(tree.n_node_samples[0])
 
-    # Compute clean top-down (x, y) coordinates in Python so Vis.js never collapses into a circle
     coords = {}
     leaf_counter = [0]
 
@@ -65,9 +53,7 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
 
     assign_coords(0, 0)
 
-    nodes = []
-    edges = []
-
+    nodes, edges = [], []
     for node in range(tree.node_count):
         n_samp = int(tree.n_node_samples[node])
         pct_traffic = (n_samp / total_samples) * 100.0
@@ -92,20 +78,12 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
         if not is_leaf:
             feat = feature_names[tree.feature[node]]
             thresh = tree.threshold[node]
-            matched_prefix = None
-            for col_cand in ["source_stream", "zone_type", "hour_band"]:
-                if feat.startswith(col_cand + "_"):
-                    matched_prefix = col_cand
-                    break
+            matched_prefix = next((c for c in cat_cols if feat.startswith(c + "_")), None)
             if matched_prefix and thresh == 0.5:
                 cat_val = feat[len(matched_prefix) + 1:]
                 split_txt = f"{matched_prefix} = {cat_val}?"
-            elif "_" in feat and thresh == 0.5:
-                base_col, cat_val = feat.split("_", 1)
-                split_txt = f"{base_col} = {cat_val}?"
             else:
                 split_txt = f"{feat} > {thresh:.1f}?"
-
             label = f"{split_txt}\nHit: {hit_prob:.1f}% | Vol: {pct_traffic:.1f}%\n(n = {n_samp:,})"
             border_width = 2
         else:
@@ -116,38 +94,27 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
             f"<b>Node #{node} ({'Terminal Leaf' if is_leaf else 'Decision Split'})</b><br>"
             f"Classification: <b>{status_lbl}</b><br>"
             f"Sample Count: {n_samp:,} ({pct_traffic:.1f}% of traffic)<br>"
-            f"True Actionable Hits (Y=1): {n_hits:,} ({hit_prob:.1f}%)<br>"
-            f"False Alarms / Noise (Y=0): {n_noise:,} ({100.0 - hit_prob:.1f}%)"
+            f"Positive Class (Y=1): {n_hits:,} ({hit_prob:.1f}%)<br>"
+            f"Negative Class (Y=0): {n_noise:,} ({100.0 - hit_prob:.1f}%)"
         )
 
         nx, ny = coords[node]
         nodes.append({
-            "id": int(node),
-            "x": float(nx),
-            "y": float(ny),
-            "label": label,
-            "title": tooltip,
-            "shape": "box",
-            "color": {
-                "background": bg_color,
-                "border": border_color,
-                "highlight": {"background": "#e0e7ff", "border": "#002D72"}
-            },
+            "id": int(node), "x": float(nx), "y": float(ny),
+            "label": label, "title": tooltip, "shape": "box",
+            "color": {"background": bg_color, "border": border_color, "highlight": {"background": "#e0e7ff", "border": "#002D72"}},
             "font": {"color": font_color, "size": 13, "face": "Segoe UI, Arial, sans-serif", "bold": is_leaf},
-            "borderWidth": border_width,
-            "margin": 10
+            "borderWidth": border_width, "margin": 10
         })
 
         if not is_leaf:
-            left_c = int(tree.children_left[node])
-            right_c = int(tree.children_right[node])
             edges.append({
-                "from": int(node), "to": left_c, "label": "No",
+                "from": int(node), "to": int(tree.children_left[node]), "label": "No",
                 "arrows": "to", "color": {"color": "#64748b"},
                 "font": {"align": "middle", "size": 12, "color": "#475569", "background": "#ffffff"}
             })
             edges.append({
-                "from": int(node), "to": right_c, "label": "Yes",
+                "from": int(node), "to": int(tree.children_right[node]), "label": "Yes",
                 "arrows": "to", "color": {"color": "#002D72"},
                 "font": {"align": "middle", "size": 12, "color": "#002D72", "bold": True, "background": "#ffffff"}
             })
@@ -182,35 +149,15 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
     var nodes = new vis.DataSet(initialNodes);
     var edges = new vis.DataSet({edges_json});
     var container = document.getElementById('mynetwork');
-    var data = {{ nodes: nodes, edges: edges }};
     var options = {{
-      layout: {{
-        hierarchical: {{ enabled: false }}
-      }},
+      layout: {{ hierarchical: {{ enabled: false }} }},
       physics: false,
-      interaction: {{
-        dragNodes: true,
-        dragView: true,
-        hover: true,
-        tooltipDelay: 100,
-        navigationButtons: true,
-        zoomView: true
-      }},
-      edges: {{
-        smooth: {{
-          type: "cubicBezier",
-          forceDirection: "vertical",
-          roundness: 0.35
-        }}
-      }}
+      interaction: {{ dragNodes: true, dragView: true, hover: true, tooltipDelay: 100, navigationButtons: true, zoomView: true }},
+      edges: {{ smooth: {{ type: "cubicBezier", forceDirection: "vertical", roundness: 0.35 }} }}
     }};
-    var network = new vis.Network(container, data, options);
+    var network = new vis.Network(container, {{ nodes: nodes, edges: edges }}, options);
     network.once("afterDrawing", function() {{ network.fit({{ animation: false }}); }});
-
-    function resetTree() {{
-      nodes.update(initialNodes);
-      network.fit({{ animation: true }});
-    }}
+    function resetTree() {{ nodes.update(initialNodes); network.fit({{ animation: true }}); }}
   </script>
 </body>
 </html>"""
@@ -218,8 +165,7 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
     escaped_doc = html_lib.escape(iframe_doc, quote=True)
     return f'<iframe srcdoc="{escaped_doc}" style="width:100%; height:610px; border:1px solid #cbd5e1; border-radius:6px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);"></iframe>'
 
-
-def extract_leaf_profiles(clf, feature_names, X_encoded, y_series, df_orig):
+def extract_leaf_profiles(clf, feature_names, cat_cols, X_encoded, y_series, df_orig):
     tree = clf.tree_
     leaf_ids = clf.apply(X_encoded)
     total_n = len(y_series)
@@ -229,10 +175,11 @@ def extract_leaf_profiles(clf, feature_names, X_encoded, y_series, df_orig):
         if tree.feature[node] != -2:
             feat = feature_names[tree.feature[node]]
             thresh = tree.threshold[node]
-            if "_" in feat and thresh == 0.5:
-                base_col, cat_val = feat.split("_", 1)
-                left_rule = f"{base_col} != {cat_val}"
-                right_rule = f"{base_col} == {cat_val}"
+            matched_prefix = next((c for c in cat_cols if feat.startswith(c + "_")), None)
+            if matched_prefix and thresh == 0.5:
+                cat_val = feat[len(matched_prefix) + 1:]
+                left_rule = f"{matched_prefix} != {cat_val}"
+                right_rule = f"{matched_prefix} == {cat_val}"
             else:
                 left_rule = f"{feat} <= {thresh:.2f}"
                 right_rule = f"{feat} > {thresh:.2f}"
@@ -262,10 +209,10 @@ def extract_leaf_profiles(clf, feature_names, X_encoded, y_series, df_orig):
 
         row_dict = {
             "Leaf ID": int(leaf_id),
-            "Command Classification": tag,
-            "Alert Volume": cnt,
+            "Classification": tag,
+            "Volume": cnt,
             "% Traffic": f"{traffic_pct:.1f}%",
-            "True Hits (Y=1)": hits,
+            "Positives (Y=1)": hits,
             "Hit Rate (%)": f"{hit_rate:.1f}%",
             "Decision Rule Path": f"<code>{paths.get(leaf_id, '')}</code>"
         }
@@ -275,41 +222,22 @@ def extract_leaf_profiles(clf, feature_names, X_encoded, y_series, df_orig):
 
     prof_df = pd.DataFrame(rows)
     prof_df["_sort"] = prof_df["Hit Rate (%)"].str.rstrip("%").astype(float)
-    prof_df = prof_df.sort_values(by="_sort", ascending=False).drop(columns=["_sort"])
-    return prof_df
-
-def create_demo_cctv_frame():
-    img = Image.new("RGB", (640, 360), color=(28, 34, 42))
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([35, 55, 605, 325], outline=(110, 130, 150), width=3)
-    draw.text((50, 22), "CAM-04 | MALKHANA & ARMOURY PERIMETER | 02:14:33 IST", fill=(230, 238, 245))
-    draw.rectangle([425, 230, 495, 285], fill=(185, 50, 40), outline=(255, 205, 75), width=2)
-    draw.text((400, 294), "[STATIONARY OBJECT > 180s]", fill=(255, 205, 75))
-    return img
+    return prof_df.sort_values(by="_sort", ascending=False).drop(columns=["_sort"])
 
 # ==============================================================================
-# TAB 1: DATA UPLOAD & 10-ROW PREVIEW
+# TAB 1: DATA UPLOAD & PREVIEW
 # ==============================================================================
-upload_widget = widgets.FileUpload(
-    accept=".csv",
-    multiple=False,
-    description="Upload CSV",
-    button_style="primary"
-)
-upload_status = widgets.HTML(
-    value=TABLE_CSS + "<div class='sv-warn'><b>Step 1:</b> Upload <code>project_drishti_alerts.csv</code> (or any compatible CSV) using the button above to unlock Tabs 2 &amp; 3.</div>"
-)
+upload_widget = widgets.FileUpload(accept=".csv", multiple=False, description="Upload CSV", button_style="primary")
+upload_status = widgets.HTML(value=TABLE_CSS + "<div class='sv-warn'><b>Step 1:</b> Upload <code>project_drishti_alerts.csv</code> (or any compatible CSV) using the button above to unlock Tabs 2 &amp; 3.</div>")
 tab1_preview_out = widgets.Output()
 
 tab1_box = widgets.VBox([
     widgets.HTML("<h3 style='color:#002D72; margin-bottom:4px;'>1. Upload Operational Dataset (.csv)</h3>"),
-    upload_widget,
-    upload_status,
-    tab1_preview_out
+    upload_widget, upload_status, tab1_preview_out
 ])
 
 # ==============================================================================
-# TAB 2: DESCRIPTIVE STATS & VARIABLE SUMMARY
+# TAB 2: DESCRIPTIVE STATS
 # ==============================================================================
 tab2_out = widgets.Output()
 with tab2_out:
@@ -321,7 +249,7 @@ tab2_box = widgets.VBox([
 ])
 
 # ==============================================================================
-# TAB 3: CASELET 1 — INTERACTIVE VISNETWORK DECISION TREE & TRIAGE
+# TAB 3: INTERACTIVE DECISION TREE & TRIAGE AUDIT
 # ==============================================================================
 y_dropdown = widgets.Dropdown(options=[], description="Target (Y):", layout=widgets.Layout(width="320px"))
 x_select = widgets.SelectMultiple(options=[], description="Predictors (X):", rows=6, layout=widgets.Layout(width="320px"))
@@ -332,7 +260,7 @@ run_tree_btn = widgets.Button(description="Run Decision Tree & Triage Audit", bu
 
 tab3_out = widgets.Output()
 with tab3_out:
-    display(HTML(TABLE_CSS + "<div class='sv-warn'>Upload <code>project_drishti_alerts.csv</code> in <b>Tab 1</b> to populate Target (Y) and Predictor (X) controls.</div>"))
+    display(HTML(TABLE_CSS + "<div class='sv-warn'>Upload a CSV in <b>Tab 1</b> to populate Target (Y) and Predictor (X) controls.</div>"))
 
 def on_run_tree(_):
     with tab3_out:
@@ -354,20 +282,16 @@ def on_run_tree(_):
         else:
             y = (pd.to_numeric(y_raw, errors="coerce").fillna(0) > 0).astype(int)
 
+        cat_cols = [c for c in predictors if df[c].dtype == object]
         X_encoded = pd.get_dummies(df[predictors], drop_first=False)
         feature_names = X_encoded.columns.tolist()
 
-        clf = DecisionTreeClassifier(
-            max_depth=depth_slider.value,
-            min_samples_leaf=leaf_slider.value,
-            random_state=42
-        )
+        clf = DecisionTreeClassifier(max_depth=depth_slider.value, min_samples_leaf=leaf_slider.value, random_state=42)
         clf.fit(X_encoded, y)
 
-        leaf_df = extract_leaf_profiles(clf, feature_names, X_encoded, y, df)
+        leaf_df = extract_leaf_profiles(clf, feature_names, cat_cols, X_encoded, y, df)
 
-        total_n = len(df)
-        total_hits = int(y.sum())
+        total_n, total_hits = len(df), int(y.sum())
         base_rate = total_hits / total_n * 100.0
         cap = cap_slider.value
 
@@ -392,18 +316,14 @@ def on_run_tree(_):
         <div class='sv-card'>
             <h4 style='margin:0 0 8px 0; color:#002D72;'>Command Triage &amp; Decision Tree Scorecard</h4>
             <ul style='margin:0; padding-left:20px;'>
-                <li><b>Incoming Volume:</b> {total_n:,} alerts | <b>Base Actionable Hit Rate:</b> {base_rate:.1f}% ({total_hits:,} true cases)</li>
+                <li><b>Incoming Volume:</b> {total_n:,} records | <b>Base Positive Rate:</b> {base_rate:.1f}% ({total_hits:,} cases)</li>
                 {vendor_html}
-                <li><b>Decision-Tree Prioritized Dispatch (Top {cap} Cap):</b> Catches <b>{dt_hits}</b> true hits | Precision: <b>{dt_prec:.1f}%</b> | Recall: <b>{dt_recall:.1f}%</b></li>
+                <li><b>Decision-Tree Prioritized Dispatch (Top {cap} Cap):</b> Catches <b>{dt_hits}</b> positives | Precision: <b>{dt_prec:.1f}%</b> | Recall: <b>{dt_recall:.1f}%</b></li>
             </ul>
         </div>
         """
         display(HTML(scorecard_html))
-
-        # Render Interactive visNetwork Hierarchical Decision Tree
-        vis_html = build_visnetwork_tree_html(clf, feature_names, target_y, df)
-        display(HTML(vis_html))
-
+        display(HTML(build_visnetwork_tree_html(clf, feature_names, cat_cols)))
         display(HTML("<h4 style='color:#002D72; margin-top:16px;'>Leaf-Node Risk &amp; Traffic Profile Table</h4>"))
         display(HTML(df_to_styled_html(leaf_df)))
 
@@ -418,134 +338,9 @@ tab3_controls = widgets.HBox([
 ])
 tab3_box = widgets.VBox([
     widgets.HTML("<h3 style='color:#002D72; margin-bottom:4px;'>3. Caselet 1: Interactive Decision Tree &amp; Triage Lab</h3>"),
-    tab3_controls,
-    tab3_out
+    tab3_controls, tab3_out
 ])
 
-# ==============================================================================
-# TAB 4: CASELET 2A — COMMODITY CCTV + VLM SENTINEL
-# ==============================================================================
-img_upload = widgets.FileUpload(accept="image/*", multiple=False, description="Upload Frame (Opt)")
-vlm_prompt = widgets.Textarea(
-    value="You are an automated police duty-officer assistant monitoring a sensitive Malkhana/perimeter gate. Flag only genuine operational anomalies (unattended baggage, perimeter breach, fire/smoke, crowd buildup) and suppress routine activity. State confidence and caveats.",
-    description="Prompt:",
-    layout=widgets.Layout(width="650px", height="85px")
-)
-api_key_in = widgets.Password(placeholder="Optional OpenRouter API Key (leave blank for offline demo)", description="API Key:", layout=widgets.Layout(width="420px"))
-model_in = widgets.Text(value="google/gemini-2.5-flash", description="VLM Model:", layout=widgets.Layout(width="420px"))
-vlm_btn = widgets.Button(description="Run VLM Perimeter Analysis", button_style="primary", icon="eye")
-tab4_out = widgets.Output()
-
-def on_run_vlm(_):
-    with tab4_out:
-        clear_output(wait=True)
-        if img_upload.value:
-            uploaded = list(img_upload.value.values())[0] if isinstance(img_upload.value, dict) else img_upload.value[0]
-            pil_img = Image.open(io.BytesIO(uploaded["content"])).convert("RGB")
-        else:
-            pil_img = create_demo_cctv_frame()
-
-        display(pil_img)
-        key = api_key_in.value.strip()
-        if key:
-            try:
-                buf = io.BytesIO()
-                pil_img.save(buf, format="JPEG")
-                b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-                payload = {
-                    "model": model_in.value.strip() or "google/gemini-2.5-flash",
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": vlm_prompt.value},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                        ]
-                    }]
-                }
-                resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=25)
-                data = resp.json()
-                text_out = data["choices"][0]["message"]["content"] if "choices" in data else json.dumps(data)
-                display(HTML(f"{TABLE_CSS}<div class='sv-card'><b>Live VLM Assessment:</b><br><pre style='white-space:pre-wrap; font-family:inherit;'>{text_out}</pre></div>"))
-                return
-            except Exception as e:
-                display(HTML(f"{TABLE_CSS}<div class='sv-warn'>API fallback triggered ({e}). Showing offline simulation output:</div>"))
-
-        fallback_html = f"""{TABLE_CSS}
-        <div class='sv-card'>
-            <h4 style='margin:0 0 8px 0; color:#002D72;'>Automated VLM Perimeter Sentinel Output (Offline Classroom Mode)</h4>
-            <ul style='margin:0; padding-left:20px;'>
-                <li><b>Alert Status:</b> <span style='color:#b91c1c; font-weight:bold;'>ANOMALY FLAGGED — PRIORITY 2 (Malkhana Perimeter)</span></li>
-                <li><b>Visual Reasoning:</b> Stationary rectangular package detected near perimeter gate at <code>02:14 IST</code> with zero human presence for &gt;180 seconds.</li>
-                <li><b>Recommended Action:</b> Route snapshot to Station Duty Officer tablet for 30-second visual check before dispatching QRT.</li>
-                <li><b>Governance Caveat:</b> <i>Confidence: 81%. Low-light sensor glare or static equipment can mimic unattended objects—Human-in-the-Loop (HITL) sign-off is mandatory.</i></li>
-            </ul>
-        </div>
-        """
-        display(HTML(fallback_html))
-
-vlm_btn.on_click(on_run_vlm)
-
-tab4_box = widgets.VBox([
-    widgets.HTML("<h3 style='color:#002D72; margin-bottom:4px;'>4. Caselet 2A: Commodity CCTV + VLM Sentinel</h3><p>Leave image blank to inspect the built-in Malkhana night-perimeter test frame, or upload any camera snapshot.</p>"),
-    img_upload,
-    vlm_prompt,
-    widgets.HBox([api_key_in, model_in]),
-    vlm_btn,
-    tab4_out
-])
-
-# ==============================================================================
-# TAB 5: CASELET 2B — INTERVIEW / WITNESS BEHAVIORAL CUE TRIAGE
-# ==============================================================================
-scen_radio = widgets.RadioButtons(
-    options=[
-        "Scenario A: Suspect Alibi Timeline (EOW Shell-Company Inquiry)",
-        "Scenario B: Eyewitness Recall Under Trauma (Highway Hit-and-Run)"
-    ],
-    layout=widgets.Layout(width="550px")
-)
-cue_btn = widgets.Button(description="Inspect VLM Behavioral Timeline", button_style="primary", icon="search")
-tab5_out = widgets.Output()
-
-def on_run_cue(_):
-    with tab5_out:
-        clear_output(wait=True)
-        if "Scenario A" in scen_radio.value:
-            html = f"""{TABLE_CSS}
-            <div class='sv-card'>
-                <h4 style='margin:0 0 8px 0; color:#002D72;'>Multimodal Cue Log — Scenario A (EOW Suspect Alibi)</h4>
-                <ul style='margin:0; padding-left:20px;'>
-                    <li><b>00:08 – 00:20 (Baseline):</b> Steady gaze and normal blink rate (~14/min) while confirming company incorporation details.</li>
-                    <li><b>00:34 – 00:42 (Flagged Cognitive Load Spike):</b> Question asked regarding <i>₹1.8 Cr cash transfer on Nov 14</i>. Blink rate rises to 28/min, 1.9s response latency, subtle asymmetric shoulder shrug.</li>
-                    <li><b>01:05 – 01:14 (Vocal Stress Shift):</b> Fundamental vocal pitch elevates +17% when asked about contact with co-accused director.</li>
-                </ul>
-                <div class='sv-warn' style='margin-top:10px;'><b>Command Governance Rule:</b> Physiological/behavioral cues indicate cognitive load or stress—<b>NOT deception</b>. Use solely to prioritize documentary verification (bank trails, CDR tower dumps), never as standalone evidence.</div>
-            </div>"""
-        else:
-            html = f"""{TABLE_CSS}
-            <div class='sv-card'>
-                <h4 style='margin:0 0 8px 0; color:#002D72;'>Multimodal Cue Log — Scenario B (Traumatized Eyewitness)</h4>
-                <ul style='margin:0; padding-left:20px;'>
-                    <li><b>00:05 – 00:24 (Acute Stress Baseline):</b> Rapid breathing, lip compression, and vocal tremor throughout initial narrative.</li>
-                    <li><b>00:41 – 00:53 (Memory Retrieval Pattern):</b> Gaze aversion upward-left while recalling partial vehicle plate digits.</li>
-                </ul>
-                <div class='sv-warn' style='margin-top:10px;'><b>Command Governance Rule:</b> Off-the-shelf emotion/stress classifiers frequently misclassify acute trauma, fatigue, or neurodivergence as 'evasion'. Human investigator context must override raw scores.</div>
-            </div>"""
-        display(HTML(html))
-
-cue_btn.on_click(on_run_cue)
-
-tab5_box = widgets.VBox([
-    widgets.HTML("<h3 style='color:#002D72; margin-bottom:4px;'>5. Caselet 2B: Interview Behavioral Cue Triage &amp; HITL Guardrails</h3>"),
-    scen_radio,
-    cue_btn,
-    tab5_out
-])
-
-# ==============================================================================
-# WIRE FILE UPLOAD EVENT TO POPULATE TABS 1, 2, AND 3
-# ==============================================================================
 def on_csv_uploaded(change):
     if not upload_widget.value:
         return
@@ -554,22 +349,18 @@ def on_csv_uploaded(change):
         content = upload_widget.value[fname]["content"]
     else:
         item = upload_widget.value[0]
-        fname = item["name"]
-        content = item["content"]
+        fname, content = item["name"], item["content"]
 
     df = pd.read_csv(io.BytesIO(content))
-    APP_STATE["df"] = df
-    APP_STATE["filename"] = fname
+    APP_STATE["df"], APP_STATE["filename"] = df, fname
 
     upload_status.value = f"{TABLE_CSS}<div class='sv-card'><b>Loaded:</b> <code>{fname}</code> ({len(df):,} rows &times; {df.shape[1]} columns). Proceed to <b>Tab 2</b> (Descriptive Stats) or <b>Tab 3</b> (Decision Tree Lab).</div>"
 
-    # Update Tab 1 Preview
     with tab1_preview_out:
         clear_output(wait=True)
         display(HTML("<h4 style='color:#002D72; margin-top:10px;'>First 10 Rows Preview</h4>"))
         display(HTML(df_to_styled_html(df, max_rows=10)))
 
-    # Update Tab 2 Descriptive Stats
     with tab2_out:
         clear_output(wait=True)
         num_df = df.select_dtypes(include=[np.number]).describe().T.reset_index().rename(columns={"index": "Numeric Variable"})
@@ -590,7 +381,6 @@ def on_csv_uploaded(change):
             display(HTML("<h4 style='color:#002D72; margin-top:18px;'>Categorical Variables Breakdown</h4>"))
             display(HTML(df_to_styled_html(pd.DataFrame(cat_rows))))
 
-    # Update Tab 3 Variable Selectors
     valid_cols = [c for c in df.columns if "id" not in c.lower()]
     default_y = "verified_actionable_flag" if "verified_actionable_flag" in valid_cols else valid_cols[0]
     default_x = [c for c in ["source_stream", "zone_type", "ai_risk_score", "prior_linkages", "hour_band"] if c in valid_cols and c != default_y]
@@ -608,24 +398,14 @@ def on_csv_uploaded(change):
 
 upload_widget.observe(on_csv_uploaded, names="value")
 
-# ==============================================================================
-# RENDER MASTER TAB CONTAINER
-# ==============================================================================
-tabs = widgets.Tab(children=[tab1_box, tab2_box, tab3_box, tab4_box, tab5_box])
-tab_titles = [
-    "1. Data Upload & Preview",
-    "2. Descriptive Stats",
-    "3. Caselet 1: Decision Tree",
-    "4. Caselet 2A: CCTV VLM",
-    "5. Caselet 2B: Interview Cues"
-]
-for i, title in enumerate(tab_titles):
+tabs = widgets.Tab(children=[tab1_box, tab2_box, tab3_box])
+for i, title in enumerate(["1. Data Upload & Preview", "2. Descriptive Stats", "3. Caselet 1: Decision Tree"]):
     tabs.set_title(i, title)
 
 header_banner = widgets.HTML("""
 <div style="background:#002D72; color:#ffffff; padding:16px 22px; border-radius:6px; border-bottom:4px solid #CFB87C; font-family:'Segoe UI', Arial, sans-serif; margin-bottom:12px;">
-    <h2 style="margin:0; font-size:19px;">SVPNPA 28th MCTP Phase III &mdash; Data Driven Decision Making Lab</h2>
-    <div style="font-size:13px; color:#e2e8f0; margin-top:4px;">Faculty: Prof. Sudhir Voleti | ISB Executive Education | Native Colab Interactive Workspace</div>
+    <h2 style="margin:0; font-size:19px;">SVPNPA 28th MCTP Phase III &mdash; Caselet 1: Command Decision Tree &amp; Triage</h2>
+    <div style="font-size:13px; color:#e2e8f0; margin-top:4px;">Faculty: Prof. Sudhir Voleti | ISB Executive Education | Generic Binary-Outcome Tree Analyzer</div>
 </div>
 """)
 
