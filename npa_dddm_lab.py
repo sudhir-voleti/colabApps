@@ -43,11 +43,11 @@ def df_to_styled_html(df, max_rows=None):
 def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
     """
     Generates an interactive Vis.js (visNetwork / visTree style) hierarchical decision tree
-    embedded via srcdoc iframe so zoom, pan, drag, and hover tooltips work natively in Colab.
+    that unlocks full 2D free-form node dragging immediately after initial layout,
+    with spacious leaf spacing and accurate class probability calculations.
     """
     tree = clf.tree_
     total_samples = int(tree.n_node_samples[0])
-    has_impact = "est_impact_lakhs" in df_orig.columns
 
     nodes = []
     edges = []
@@ -56,51 +56,61 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
         n_samp = int(tree.n_node_samples[node])
         pct_traffic = (n_samp / total_samples) * 100.0
         vals = tree.value[node][0]
-        n_noise = int(vals[0])
-        n_hits = int(vals[1]) if len(vals) > 1 else 0
-        hit_prob = (n_hits / n_samp) * 100.0 if n_samp > 0 else 0.0
 
-        # Color scheme matching visTree / executive palette
+        # sklearn >= 1.4 stores normalized proportions in tree.value; handle both proportions and raw counts
+        total_v = float(vals.sum())
+        hit_prob = (float(vals[1]) / total_v) * 100.0 if len(vals) > 1 and total_v > 0 else 0.0
+        n_hits = int(round((hit_prob / 100.0) * n_samp))
+        n_noise = n_samp - n_hits
+
         if hit_prob >= 55:
             bg_color, border_color, font_color = "#d1fae5", "#047857", "#064e3b"
-            status_lbl = "ACTIONABLE (HIGH YIELD)"
+            status_lbl = "HIGH YIELD"
         elif hit_prob >= 25:
             bg_color, border_color, font_color = "#fef3c7", "#b45309", "#78350f"
-            status_lbl = "SELECTIVE / MODERATE"
+            status_lbl = "SELECTIVE"
         else:
             bg_color, border_color, font_color = "#fee2e2", "#b91c1c", "#7f1d1d"
-            status_lbl = "NOISE / FALSE-ALARM TRAP"
+            status_lbl = "NOISE TRAP"
 
         is_leaf = bool(tree.feature[node] == -2)
         if not is_leaf:
             feat = feature_names[tree.feature[node]]
             thresh = tree.threshold[node]
-            if "_" in feat and thresh == 0.5:
+            # Clean split label for one-hot encoded columns (e.g., source_stream_CCTV_Analytics -> source_stream = CCTV_Analytics?)
+            matched_prefix = None
+            for col_cand in ["source_stream", "zone_type", "hour_band"]:
+                if feat.startswith(col_cand + "_"):
+                    matched_prefix = col_cand
+                    break
+            if matched_prefix and thresh == 0.5:
+                cat_val = feat[len(matched_prefix) + 1:]
+                split_txt = f"{matched_prefix} = {cat_val}?"
+            elif "_" in feat and thresh == 0.5:
                 base_col, cat_val = feat.split("_", 1)
                 split_txt = f"{base_col} = {cat_val}?"
             else:
                 split_txt = f"{feat} > {thresh:.1f}?"
-            label = f"{split_txt}\nHit: {hit_prob:.1f}% | Traffic: {pct_traffic:.1f}%\n(n = {n_samp:,})"
-            shape = "box"
+
+            label = f"{split_txt}\nHit: {hit_prob:.1f}% | Vol: {pct_traffic:.1f}%\n(n = {n_samp:,})"
             border_width = 2
         else:
-            label = f"LEAF #{node}: {status_lbl}\nHit Rate: {hit_prob:.1f}%\nTraffic: {pct_traffic:.1f}% (n = {n_samp:,})"
-            shape = "box"
+            label = f"LEAF #{node} [{status_lbl}]\nHit Rate: {hit_prob:.1f}%\nTraffic: {pct_traffic:.1f}% (n={n_samp:,})"
             border_width = 3
 
         tooltip = (
             f"<b>Node #{node} ({'Terminal Leaf' if is_leaf else 'Decision Split'})</b><br>"
-            f"Status: {status_lbl}<br>"
+            f"Classification: <b>{status_lbl}</b><br>"
             f"Sample Count: {n_samp:,} ({pct_traffic:.1f}% of traffic)<br>"
             f"True Actionable Hits (Y=1): {n_hits:,} ({hit_prob:.1f}%)<br>"
-            f"False Alarms / Noise (Y=0): {n_noise:,} ({100 - hit_prob:.1f}%)"
+            f"False Alarms / Noise (Y=0): {n_noise:,} ({100.0 - hit_prob:.1f}%)"
         )
 
         nodes.append({
             "id": int(node),
             "label": label,
             "title": tooltip,
-            "shape": shape,
+            "shape": "box",
             "color": {
                 "background": bg_color,
                 "border": border_color,
@@ -136,15 +146,18 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
   <style>
     body {{ margin: 0; padding: 0; font-family: 'Segoe UI', Arial, sans-serif; background: #ffffff; }}
     #toolbar {{ background: #f8fafc; border-bottom: 1px solid #cbd5e1; padding: 8px 14px; font-size: 12.5px; color: #334155; display: flex; justify-content: space-between; align-items: center; }}
-    #mynetwork {{ width: 100%; height: 520px; border: none; }}
-    .btn {{ background: #002D72; color: #fff; border: none; padding: 5px 11px; border-radius: 4px; cursor: pointer; font-size: 12px; }}
+    #mynetwork {{ width: 100%; height: 560px; border: none; }}
+    .btn {{ background: #002D72; color: #fff; border: none; padding: 5px 11px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 6px; }}
     .btn:hover {{ background: #1e40af; }}
   </style>
 </head>
 <body>
   <div id="toolbar">
-    <span><b>Interactive Command Tree (visNetwork Style):</b> Scroll to zoom &bull; Drag canvas/nodes &bull; Hover any box for node stats</span>
-    <button class="btn" onclick="network.fit({{animation: true}})">Reset Zoom / Fit Tree</button>
+    <span><b>Interactive Command Tree (visNetwork Mode):</b> Freely drag any node anywhere &bull; Scroll to zoom &bull; Hover for exact counts</span>
+    <div>
+      <button class="btn" onclick="relayoutHierarchical()">Auto-Align Tree</button>
+      <button class="btn" onclick="network.fit({{animation: true}})">Fit to Screen</button>
+    </div>
   </div>
   <div id="mynetwork"></div>
   <script type="text/javascript">
@@ -152,20 +165,25 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
     var edges = new vis.DataSet({edges_json});
     var container = document.getElementById('mynetwork');
     var data = {{ nodes: nodes, edges: edges }};
-    var options = {{
+    var hierarchicalOpts = {{
       layout: {{
         hierarchical: {{
+          enabled: true,
           direction: "UD",
           sortMethod: "directed",
-          levelSeparation: 115,
-          nodeSpacing: 220,
-          treeSpacing: 240
+          levelSeparation: 155,
+          nodeSpacing: 340,
+          treeSpacing: 360
         }}
       }},
-      physics: false,
+      physics: false
+    }};
+    var baseOpts = {{
       interaction: {{
+        dragNodes: true,
+        dragView: true,
         hover: true,
-        tooltipDelay: 120,
+        tooltipDelay: 100,
         navigationButtons: true,
         zoomView: true
       }},
@@ -173,18 +191,32 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
         smooth: {{
           type: "cubicBezier",
           forceDirection: "vertical",
-          roundness: 0.4
+          roundness: 0.35
         }}
       }}
     }};
-    var network = new vis.Network(container, data, options);
+    var network = new vis.Network(container, data, Object.assign({{}}, baseOpts, hierarchicalOpts));
+
+    // Unlock free 2D node dragging immediately after initial hierarchical placement
+    network.once("afterDrawing", function() {{
+      network.setOptions({{ layout: {{ hierarchical: {{ enabled: false }} }} }});
+      network.fit({{ animation: false }});
+    }});
+
+    function relayoutHierarchical() {{
+      network.setOptions(hierarchicalOpts);
+      network.once("afterDrawing", function() {{
+        network.setOptions({{ layout: {{ hierarchical: {{ enabled: false }} }} }});
+        network.fit({{ animation: true }});
+      }});
+    }}
   </script>
 </body>
 </html>"""
 
     escaped_doc = html_lib.escape(iframe_doc, quote=True)
-    return f'<iframe srcdoc="{escaped_doc}" style="width:100%; height:570px; border:1px solid #cbd5e1; border-radius:6px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);"></iframe>'
-
+    return f'<iframe srcdoc="{escaped_doc}" style="width:100%; height:610px; border:1px solid #cbd5e1; border-radius:6px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);"></iframe>'
+    
 def extract_leaf_profiles(clf, feature_names, X_encoded, y_series, df_orig):
     tree = clf.tree_
     leaf_ids = clf.apply(X_encoded)
