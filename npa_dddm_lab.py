@@ -42,12 +42,28 @@ def df_to_styled_html(df, max_rows=None):
 
 def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
     """
-    Generates an interactive Vis.js (visNetwork / visTree style) hierarchical decision tree
-    that unlocks full 2D free-form node dragging immediately after initial layout,
-    with spacious leaf spacing and accurate class probability calculations.
+    Generates an interactive Vis.js (visNetwork / visTree style) decision tree
+    with explicit top-down coordinates (zero overlap) and full 2D free-form node dragging.
     """
     tree = clf.tree_
     total_samples = int(tree.n_node_samples[0])
+
+    # Compute clean top-down (x, y) coordinates in Python so Vis.js never collapses into a circle
+    coords = {}
+    leaf_counter = [0]
+
+    def assign_coords(node, depth):
+        if tree.feature[node] == -2:
+            coords[node] = (leaf_counter[0] * 290, depth * 175)
+            leaf_counter[0] += 1
+        else:
+            assign_coords(tree.children_left[node], depth + 1)
+            assign_coords(tree.children_right[node], depth + 1)
+            lx, _ = coords[tree.children_left[node]]
+            rx, _ = coords[tree.children_right[node]]
+            coords[node] = ((lx + rx) / 2.0, depth * 175)
+
+    assign_coords(0, 0)
 
     nodes = []
     edges = []
@@ -57,7 +73,6 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
         pct_traffic = (n_samp / total_samples) * 100.0
         vals = tree.value[node][0]
 
-        # sklearn >= 1.4 stores normalized proportions in tree.value; handle both proportions and raw counts
         total_v = float(vals.sum())
         hit_prob = (float(vals[1]) / total_v) * 100.0 if len(vals) > 1 and total_v > 0 else 0.0
         n_hits = int(round((hit_prob / 100.0) * n_samp))
@@ -77,7 +92,6 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
         if not is_leaf:
             feat = feature_names[tree.feature[node]]
             thresh = tree.threshold[node]
-            # Clean split label for one-hot encoded columns (e.g., source_stream_CCTV_Analytics -> source_stream = CCTV_Analytics?)
             matched_prefix = None
             for col_cand in ["source_stream", "zone_type", "hour_band"]:
                 if feat.startswith(col_cand + "_"):
@@ -106,8 +120,11 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
             f"False Alarms / Noise (Y=0): {n_noise:,} ({100.0 - hit_prob:.1f}%)"
         )
 
+        nx, ny = coords[node]
         nodes.append({
             "id": int(node),
+            "x": float(nx),
+            "y": float(ny),
             "label": label,
             "title": tooltip,
             "shape": "box",
@@ -153,32 +170,24 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
 </head>
 <body>
   <div id="toolbar">
-    <span><b>Interactive Command Tree (visNetwork Mode):</b> Freely drag any node anywhere &bull; Scroll to zoom &bull; Hover for exact counts</span>
+    <span><b>Interactive Command Tree (visNetwork Style):</b> Drag any node freely in 2D &bull; Scroll to zoom &bull; Hover for exact stats</span>
     <div>
-      <button class="btn" onclick="relayoutHierarchical()">Auto-Align Tree</button>
+      <button class="btn" onclick="resetTree()">Reset Tree Layout</button>
       <button class="btn" onclick="network.fit({{animation: true}})">Fit to Screen</button>
     </div>
   </div>
   <div id="mynetwork"></div>
   <script type="text/javascript">
-    var nodes = new vis.DataSet({nodes_json});
+    var initialNodes = {nodes_json};
+    var nodes = new vis.DataSet(initialNodes);
     var edges = new vis.DataSet({edges_json});
     var container = document.getElementById('mynetwork');
     var data = {{ nodes: nodes, edges: edges }};
-    var hierarchicalOpts = {{
+    var options = {{
       layout: {{
-        hierarchical: {{
-          enabled: true,
-          direction: "UD",
-          sortMethod: "directed",
-          levelSeparation: 155,
-          nodeSpacing: 340,
-          treeSpacing: 360
-        }}
+        hierarchical: {{ enabled: false }}
       }},
-      physics: false
-    }};
-    var baseOpts = {{
+      physics: false,
       interaction: {{
         dragNodes: true,
         dragView: true,
@@ -195,20 +204,12 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
         }}
       }}
     }};
-    var network = new vis.Network(container, data, Object.assign({{}}, baseOpts, hierarchicalOpts));
+    var network = new vis.Network(container, data, options);
+    network.once("afterDrawing", function() {{ network.fit({{ animation: false }}); }});
 
-    // Unlock free 2D node dragging immediately after initial hierarchical placement
-    network.once("afterDrawing", function() {{
-      network.setOptions({{ layout: {{ hierarchical: {{ enabled: false }} }} }});
-      network.fit({{ animation: false }});
-    }});
-
-    function relayoutHierarchical() {{
-      network.setOptions(hierarchicalOpts);
-      network.once("afterDrawing", function() {{
-        network.setOptions({{ layout: {{ hierarchical: {{ enabled: false }} }} }});
-        network.fit({{ animation: true }});
-      }});
+    function resetTree() {{
+      nodes.update(initialNodes);
+      network.fit({{ animation: true }});
     }}
   </script>
 </body>
@@ -216,7 +217,8 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
 
     escaped_doc = html_lib.escape(iframe_doc, quote=True)
     return f'<iframe srcdoc="{escaped_doc}" style="width:100%; height:610px; border:1px solid #cbd5e1; border-radius:6px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);"></iframe>'
-    
+
+
 def extract_leaf_profiles(clf, feature_names, X_encoded, y_series, df_orig):
     tree = clf.tree_
     leaf_ids = clf.apply(X_encoded)
