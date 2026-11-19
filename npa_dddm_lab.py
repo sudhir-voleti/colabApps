@@ -221,7 +221,7 @@ def on_run_tree(_):
         """
         display(HTML(scorecard_html))
 
-        # Plot Classical Decision Tree
+       # Plot Classical Decision Tree
         fig, ax = plt.subplots(figsize=(15, 6.5), dpi=120)
         plot_tree(
             clf,
@@ -231,7 +231,7 @@ def on_run_tree(_):
             rounded=True,
             proportion=True,
             precision=1,
-            fontsize=8.5,
+            fontsize=9,
             ax=ax
         )
         ax.set_title(f"Command Decision Tree (Target: {target_y} | Max Depth: {depth_slider.value})", fontsize=12, fontweight="bold", color="#002D72")
