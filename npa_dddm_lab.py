@@ -71,7 +71,7 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
             bg_color, border_color, font_color = "#fee2e2", "#b91c1c", "#7f1d1d"
             status_lbl = "NOISE / FALSE-ALARM TRAP"
 
-        is_leaf = (tree.feature[node] == -2)
+        is_leaf = bool(tree.feature[node] == -2)
         if not is_leaf:
             feat = feature_names[tree.feature[node]]
             thresh = tree.threshold[node]
@@ -125,7 +125,7 @@ def build_visnetwork_tree_html(clf, feature_names, target_name, df_orig):
                 "font": {"align": "middle", "size": 12, "color": "#002D72", "bold": True, "background": "#ffffff"}
             })
 
-    nodes_json = json.dumps(nodes)
+    nodes_json = json.dumps(nodes, default=lambda o: bool(o) if isinstance(o, np.bool_) else int(o) if isinstance(o, np.integer) else float(o))
     edges_json = json.dumps(edges)
 
     iframe_doc = f"""<!DOCTYPE html>
